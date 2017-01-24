@@ -84,6 +84,10 @@ docker:
 	@echo ">> building docker image"
 	@docker build -t "$(DOCKER_IMAGE_NAME):$(DOCKER_IMAGE_TAG)" .
 
+test-docker:
+	@echo ">> testing docker image"
+	./test_image.sh "$(DOCKER_IMAGE_NAME):$(DOCKER_IMAGE_TAG)" 9100
+
 $(GOPATH)/bin/promu promu:
 	mkdir -p $(GOPATH)/src/github.com/prometheus/
 	git clone -b v0.1.0 https://github.com/prometheus/promu.git $(GOPATH)/src/github.com/prometheus/promu
