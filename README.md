@@ -136,3 +136,13 @@ As a general rule of thumb, please try to create bug reports that are:
 - *Specific.* Include as much detail as possible: which version, what environment, etc.
 - *Unique.* Do not duplicate existing tickets.
 - *Scoped to a Single Bug.* One bug per report.
+
+## Using a third-party repository for RHEL/CentOS/Fedora
+
+There is a [community-supplied COPR repository](https://copr.fedorainfracloud.org/coprs/ibotty/prometheus-exporters/). It closely follows upstream releases.
+
+[travis]: https://travis-ci.org/prometheus/node_exporter
+[hub]: https://hub.docker.com/r/prom/node-exporter/
+[circleci]: https://circleci.com/gh/prometheus/node_exporter
+[quay]: https://quay.io/repository/prometheus/node-exporter
+[goreportcard]: https://goreportcard.com/report/github.com/prometheus/node_exporter
