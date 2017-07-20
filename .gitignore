@@ -33,3 +33,5 @@ dependencies-stamp
 *.iml
 
 vendor/
+# Test files extracted from ttar
+collector/fixtures/sys/
