@@ -162,6 +162,9 @@ docker run -d -p 9100:9100 \
     -collector.filesystem.ignored-mount-points "^/(sys|proc|dev|host|etc)($|/)"
 ```
 
+Be aware though that the mountpoint label in various metrics will now have
+`/rootfs` as prefix.
+
 ## Using a third-party repository for RHEL/CentOS/Fedora
 
 There is a [community-supplied COPR repository](https://copr.fedorainfracloud.org/coprs/ibotty/prometheus-exporters/). It closely follows upstream releases.
