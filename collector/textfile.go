@@ -17,7 +17,6 @@
 package collector
 
 import (
-	"flag"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -31,10 +30,11 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/log"
+	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 var (
-	textFileDirectory = flag.String("collector.textfile.directory", "/opt/ss/ssm-client/textfile-collector", "Directory to read text files with metrics from.")
+	textFileDirectory = kingpin.Flag("collector.textfile.directory", "Directory to read text files with metrics from.").Default("").String()
 )
 
 type textFileCollector struct {

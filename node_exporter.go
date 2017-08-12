@@ -34,6 +34,7 @@ import (
 	"gopkg.in/ini.v1"
 
 	"github.com/shatteredsilicon/exporter_shared"
+	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 const (
@@ -139,11 +140,17 @@ var (
 
 func main() {
 	flag.Parse()
+	var (
+		listenAddress     = kingpin.Flag("web.listen-address", "Address on which to expose metrics and web interface.").Default(":9100").String()
+		metricsPath       = kingpin.Flag("web.telemetry-path", "Path under which to expose metrics.").Default("/metrics").String()
+		enabledCollectors = kingpin.Flag("collectors.enabled", "Comma-separated list of collectors to use.").Default(filterAvailableCollectors(defaultCollectors)).String()
+		printCollectors   = kingpin.Flag("collectors.print", "If true, print available collectors and exit.").Bool()
+	)
 
-	if *showVersion {
-		fmt.Fprintln(os.Stdout, version.Print("node_exporter"))
-		os.Exit(0)
-	}
+	log.AddFlags(kingpin.CommandLine)
+	kingpin.Version(version.Print("node_exporter"))
+	kingpin.HelpFlag.Short('h')
+	kingpin.Parse()
 
 	if os.Getenv("ON_CONFIGURE") == "1" {
 		err := configure()
