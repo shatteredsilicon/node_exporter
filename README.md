@@ -1,4 +1,10 @@
-# Percona Node Exporter
+# Node exporter [![Build Status](https://travis-ci.org/prometheus/node_exporter.svg)][travis]
+
+[![CircleCI](https://circleci.com/gh/prometheus/node_exporter/tree/master.svg?style=shield)][circleci]
+[![Buildkite status](https://badge.buildkite.com/94a0c1fb00b1f46883219c256efe9ce01d63b6505f3a942f9b.svg)](https://buildkite.com/prometheus/node-exporter)
+[![Docker Repository on Quay](https://quay.io/repository/prometheus/node-exporter/status)][quay]
+[![Docker Pulls](https://img.shields.io/docker/pulls/prom/node-exporter.svg?maxAge=604800)][hub]
+[![Go Report Card](https://goreportcard.com/badge/github.com/prometheus/node_exporter)][goreportcard]
 
 Prometheus exporter for hardware and OS metrics exposed by \*NIX kernels, written
 in Go with pluggable metric collectors.
