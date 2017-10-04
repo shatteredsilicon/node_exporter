@@ -153,7 +153,7 @@ func (c *ntpCollector) Update(ch chan<- prometheus.Metric) error {
 		maxerr += time.Second
 	}
 
-	if resp.Validate() && resp.RootDistance <= *ntpMaxDistance && resp.CausalityViolation <= maxerr {
+	if resp.Validate() == nil && resp.RootDistance <= *ntpMaxDistance && resp.MinError <= maxerr {
 		ch <- c.sanity.mustNewConstMetric(1)
 	} else {
 		ch <- c.sanity.mustNewConstMetric(0)
