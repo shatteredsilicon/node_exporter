@@ -49,6 +49,40 @@ var (
 	printCollectors   = flag.Bool("collectors.print", false, "If true, print available collectors and exit.")
 )
 
+func handler(w http.ResponseWriter, r *http.Request) {
+	filters := r.URL.Query()["collect[]"]
+	log.Debugln("collect query:", filters)
+
+	nc, err := collector.NewNodeCollector(filters...)
+	if err != nil {
+		log.Warnln("Couldn't create", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(fmt.Sprintf("Couldn't create %s", err)))
+		return
+	}
+
+	registry := prometheus.NewRegistry()
+	err = registry.Register(nc)
+	if err != nil {
+		log.Errorln("Couldn't register collector:", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(fmt.Sprintf("Couldn't register collector: %s", err)))
+		return
+	}
+
+	gatherers := prometheus.Gatherers{
+		prometheus.DefaultGatherer,
+		registry,
+	}
+	// Delegate http serving to Prometheus client library, which will call collector.Collect.
+	h := promhttp.HandlerFor(gatherers,
+		promhttp.HandlerOpts{
+			ErrorLog:      log.NewErrorLogger(),
+			ErrorHandling: promhttp.ContinueOnError,
+		})
+	h.ServeHTTP(w, r)
+}
+
 func main() {
 	flag.Parse()
 	var (
@@ -95,6 +129,7 @@ func main() {
 		return
 	}
 	collectors, err := loadCollectors(lookupConfig("collectors.enabled", *enabledCollectors).(string))
+	// This instance is only used to check collector creation and logging.
 	nc, err := collector.NewNodeCollector()
 	if err != nil {
 		log.Fatalf("Couldn't create collector: %s", err)
@@ -121,6 +156,8 @@ func main() {
 
 	// TODO(ts): Remove deprecated and problematic InstrumentHandler usage.
 	http.Handle(metricsP, prometheus.InstrumentHandler("prometheus", handler))
+	// TODO(ts): Remove deprecated and problematic InstrumentHandlerFunc usage.
+	http.HandleFunc(*metricsPath, prometheus.InstrumentHandlerFunc("prometheus", handler))
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
 			<head><title>Node Exporter</title></head>
