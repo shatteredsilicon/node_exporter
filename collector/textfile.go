@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -35,6 +36,7 @@ import (
 
 var (
 	textFileDirectory = kingpin.Flag("collector.textfile.directory", "Directory to read text files with metrics from.").Default("").String()
+	textFileAddOnce   sync.Once
 )
 
 type textFileCollector struct {
@@ -57,10 +59,12 @@ func NewTextFileCollector() (Collector, error) {
 		// the flag is not passed.
 		log.Infof("No directory specified, see --collector.textfile.directory")
 	} else {
-		prometheus.DefaultGatherer = prometheus.Gatherers{
-			prometheus.DefaultGatherer,
-			prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) { return c.parseTextFiles(), nil }),
-		}
+		textFileAddOnce.Do(func() {
+			prometheus.DefaultGatherer = prometheus.Gatherers{
+				prometheus.DefaultGatherer,
+				prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) { return c.parseTextFiles(), nil }),
+			}
+		})
 	}
 
 	return c, nil
