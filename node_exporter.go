@@ -31,7 +31,6 @@ import (
 	"github.com/prometheus/node_exporter/collector"
 	"gopkg.in/ini.v1"
 
-	"github.com/shatteredsilicon/exporter_shared"
 	"gopkg.in/alecthomas/kingpin.v2"
 )
 
@@ -75,11 +74,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		registry,
 	}
 	// Delegate http serving to Prometheus client library, which will call collector.Collect.
-	h := promhttp.HandlerFor(gatherers,
-		promhttp.HandlerOpts{
-			ErrorLog:      log.NewErrorLogger(),
-			ErrorHandling: promhttp.ContinueOnError,
-		})
+	h := promhttp.InstrumentMetricHandler(
+		registry,
+		promhttp.HandlerFor(gatherers,
+			promhttp.HandlerOpts{
+				ErrorLog:      log.NewErrorLogger(),
+				ErrorHandling: promhttp.ContinueOnError,
+			}),
+	)
 	h.ServeHTTP(w, r)
 }
 
@@ -139,25 +141,7 @@ func main() {
 		log.Infof(" - %s", n)
 	}
 
-	if err := prometheus.Register(nc); err != nil {
-		log.Fatalf("Couldn't register collector: %s", err)
-	}
-
-	// Use our shared code to run server and exit on error. Upstream's code below will not be executed.
-	listenA := lookupConfig("web.listen-address", *listenAddress).(string)
-	metricsP := lookupConfig("web.telemetry-path", *metricsPath).(string)
-	exporter_shared.RunServer("Node", listenA, metricsP, promhttp.ContinueOnError)
-
-	handler := promhttp.HandlerFor(prometheus.DefaultGatherer,
-		promhttp.HandlerOpts{
-			ErrorLog:      log.NewErrorLogger(),
-			ErrorHandling: promhttp.ContinueOnError,
-		})
-
-	// TODO(ts): Remove deprecated and problematic InstrumentHandler usage.
-	http.Handle(metricsP, prometheus.InstrumentHandler("prometheus", handler))
-	// TODO(ts): Remove deprecated and problematic InstrumentHandlerFunc usage.
-	http.HandleFunc(*metricsPath, prometheus.InstrumentHandlerFunc("prometheus", handler))
+	http.HandleFunc(*metricsPath, handler)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
 			<head><title>Node Exporter</title></head>
