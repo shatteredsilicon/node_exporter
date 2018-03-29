@@ -137,7 +137,12 @@ func main() {
 		log.Fatalf("Couldn't create collector: %s", err)
 	}
 	log.Infof("Enabled collectors:")
+	collectors := []string{}
 	for n := range nc.Collectors {
+		collectors = append(collectors, n)
+	}
+	sort.Strings(collectors)
+	for _, n := range collectors {
 		log.Infof(" - %s", n)
 	}
 
