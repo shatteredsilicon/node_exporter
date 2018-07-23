@@ -70,14 +70,17 @@ $(eval $(call goarch_pair,mips64el,mipsel))
 
 all: style vet staticcheck checkmetrics build test $(cross-test) $(test-e2e)
 
+.PHONY: test
 test: collector/fixtures/sys/.unpacked
 	@echo ">> running tests"
 	$(GO) test -short $(test-flags) $(pkgs)
 
+.PHONY: test-32bit
 test-32bit: collector/fixtures/sys/.unpacked
 	@echo ">> running tests in 32-bit mode"
 	@env GOARCH=$(GOARCH_CROSS) $(GO) test $(pkgs)
 
+.PHONY: skip-test-32bit
 skip-test-32bit:
 	@echo ">> SKIP running tests in 32-bit mode: not supported on $(OS_detected)/$(GOARCH)"
 
@@ -87,25 +90,21 @@ collector/fixtures/sys/.unpacked: collector/fixtures/sys.ttar
 	./ttar -C collector/fixtures -x -f collector/fixtures/sys.ttar
 	touch $@
 
+.PHONY: test-e2e
 test-e2e: build collector/fixtures/sys/.unpacked
 	@echo ">> running end-to-end tests"
 	./end-to-end-test.sh
 
-
+.PHONY: skip-test-e2e
 skip-test-e2e:
 	@echo ">> SKIP running end-to-end tests on $(OS_detected)"
 
-verify-vendor:
-	@echo ">> verify that vendor/ is in sync with code and Gopkg.*"
-	curl https://github.com/golang/dep/releases/download/v0.4.1/dep-linux-amd64 -L -o ~/dep && chmod +x ~/dep
-	rm -fr vendor/
-	~/dep ensure -v -vendor-only
-	git diff --exit-code
-
+.PHONY: checkmetrics
 checkmetrics: $(PROMTOOL)
 	@echo ">> checking metrics for correctness"
 	./checkmetrics.sh $(PROMTOOL) $(e2e-out)
 
+.PHONY: docker
 docker:
 ifeq ($(MACH), ppc64le)
 	$(eval DOCKERFILE=Dockerfile.ppc64le)
@@ -113,10 +112,12 @@ endif
 	@echo ">> building docker image from $(DOCKERFILE)"
 	@docker build --file $(DOCKERFILE) -t "$(DOCKER_IMAGE_NAME):$(DOCKER_IMAGE_TAG)" .
 
+.PHONY: test-docker
 test-docker:
 	@echo ">> testing docker image"
 	./test_image.sh "$(DOCKER_IMAGE_NAME):$(DOCKER_IMAGE_TAG)" 9100
 
+.PHONY: promtool $(FIRST_GOPATH)/bin/promtool
 $(FIRST_GOPATH)/bin/promtool promtool:
 	@GOOS= GOARCH= $(GO) get -u github.com/prometheus/prometheus/cmd/promtool
 
@@ -124,12 +125,3 @@ $(GOPATH)/bin/promu promu:
 	mkdir -p $(GOPATH)/src/github.com/prometheus/
 	git clone -b v0.1.0 https://github.com/prometheus/promu.git $(GOPATH)/src/github.com/prometheus/promu
 	@GOOS= GOARCH= $(GO) install $(GOPATH)/src/github.com/prometheus/promu
-
-
-.PHONY: test-e2e promu promtool checkmetrics
-
-# Declaring the binaries at their default locations as PHONY targets is a hack
-# to ensure the latest version is downloaded on every make execution.
-# If this is not desired, copy/symlink these binaries to a different path and
-# set the respective environment variables.
-.PHONY: $(FIRST_GOPATH)/bin/promtool
