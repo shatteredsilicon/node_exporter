@@ -28,3 +28,4 @@ crossbuild:
         - linux/mips64le
         - linux/ppc64
         - linux/ppc64le
+        - linux/s390x
