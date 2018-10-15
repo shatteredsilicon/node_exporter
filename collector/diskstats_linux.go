@@ -11,6 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !nodiskstats
 // +build !nodiskstats
 
 package collector
@@ -30,8 +31,9 @@ import (
 )
 
 const (
-	diskSubsystem  = "disk"
-	diskSectorSize = 512
+	diskSubsystem     = "disk"
+	diskSectorSize    = 512
+	diskstatsFilename = "diskstats"
 )
 
 var (
@@ -61,12 +63,12 @@ func init() {
 }
 
 // NewDiskstatsCollector returns a new Collector exposing disk device stats.
+// Docs from https://www.kernel.org/doc/Documentation/iostats.txt
 func NewDiskstatsCollector() (Collector, error) {
 	var diskLabelNames = []string{"device"}
 
 	return &diskstatsCollector{
 		ignoredDevicesPattern: regexp.MustCompile(*ignoredDevices),
-		// Docs from https://www.kernel.org/doc/Documentation/iostats.txt
 		descs: []typedFactorDesc{
 			{
 				desc: prometheus.NewDesc(
@@ -79,7 +81,7 @@ func NewDiskstatsCollector() (Collector, error) {
 			{
 				desc: prometheus.NewDesc(
 					prometheus.BuildFQName(namespace, diskSubsystem, "reads_merged_total"),
-					"The total number of reads merged. See https://www.kernel.org/doc/Documentation/iostats.txt.",
+					"The total number of reads merged.",
 					diskLabelNames,
 					nil,
 				), valueType: prometheus.CounterValue,
@@ -113,7 +115,7 @@ func NewDiskstatsCollector() (Collector, error) {
 			{
 				desc: prometheus.NewDesc(
 					prometheus.BuildFQName(namespace, diskSubsystem, "writes_merged_total"),
-					"The number of writes merged. See https://www.kernel.org/doc/Documentation/iostats.txt.",
+					"The number of writes merged.",
 					diskLabelNames,
 					nil,
 				), valueType: prometheus.CounterValue,
@@ -156,7 +158,40 @@ func NewDiskstatsCollector() (Collector, error) {
 			{
 				desc: prometheus.NewDesc(
 					prometheus.BuildFQName(namespace, diskSubsystem, "io_time_weighted_seconds_total"),
-					"The weighted # of seconds spent doing I/Os. See https://www.kernel.org/doc/Documentation/iostats.txt.",
+					"The weighted # of seconds spent doing I/Os.",
+					diskLabelNames,
+					nil,
+				), valueType: prometheus.CounterValue,
+				factor: .001,
+			},
+			{
+				desc: prometheus.NewDesc(
+					prometheus.BuildFQName(namespace, diskSubsystem, "discards_completed_total"),
+					"The total number of discards completed successfully.",
+					diskLabelNames,
+					nil,
+				), valueType: prometheus.CounterValue,
+			},
+			{
+				desc: prometheus.NewDesc(
+					prometheus.BuildFQName(namespace, diskSubsystem, "discards_merged_total"),
+					"The total number of discards merged.",
+					diskLabelNames,
+					nil,
+				), valueType: prometheus.CounterValue,
+			},
+			{
+				desc: prometheus.NewDesc(
+					prometheus.BuildFQName(namespace, diskSubsystem, "discarded_sectors_total"),
+					"The total number of sectors discard successfully.",
+					diskLabelNames,
+					nil,
+				), valueType: prometheus.CounterValue,
+			},
+			{
+				desc: prometheus.NewDesc(
+					prometheus.BuildFQName(namespace, diskSubsystem, "discard_time_seconds_total"),
+					"This is the total number of seconds spent by all discards.",
 					diskLabelNames,
 					nil,
 				), valueType: prometheus.CounterValue,
@@ -211,7 +246,7 @@ func (c *diskstatsCollector) Update(ch chan<- prometheus.Metric) error {
 		}
 
 		if len(stats) > len(c.descs) {
-			return fmt.Errorf("invalid line for %s for %s", procFilePath("diskstats"), dev)
+			return fmt.Errorf("invalid line for %s for %s", procFilePath(diskstatsFilename), dev)
 		}
 
 		for i, value := range stats {
@@ -225,8 +260,8 @@ func (c *diskstatsCollector) Update(ch chan<- prometheus.Metric) error {
 	return nil
 }
 
-func getDiskStats() (map[string]map[int]string, error) {
-	file, err := os.Open(procFilePath("diskstats"))
+func getDiskStats() (map[string][]string, error) {
+	file, err := os.Open(procFilePath(diskstatsFilename))
 	if err != nil {
 		return nil, err
 	}
@@ -235,22 +270,19 @@ func getDiskStats() (map[string]map[int]string, error) {
 	return parseDiskStats(file)
 }
 
-func parseDiskStats(r io.Reader) (map[string]map[int]string, error) {
+func parseDiskStats(r io.Reader) (map[string][]string, error) {
 	var (
-		diskStats = map[string]map[int]string{}
+		diskStats = map[string][]string{}
 		scanner   = bufio.NewScanner(r)
 	)
 
 	for scanner.Scan() {
 		parts := strings.Fields(scanner.Text())
 		if len(parts) < 4 { // we strip major, minor and dev
-			return nil, fmt.Errorf("invalid line in %s: %s", procFilePath("diskstats"), scanner.Text())
+			return nil, fmt.Errorf("invalid line in %s: %s", procFilePath(diskstatsFilename), scanner.Text())
 		}
 		dev := parts[2]
-		diskStats[dev] = map[int]string{}
-		for i, v := range parts[3:] {
-			diskStats[dev][i] = v
-		}
+		diskStats[dev] = parts[3:]
 	}
 
 	return diskStats, scanner.Err()
