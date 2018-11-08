@@ -34,62 +34,126 @@ import (
 	"gopkg.in/alecthomas/kingpin.v2"
 )
 
-func init() {
-	prometheus.MustRegister(version.NewCollector("node_exporter"))
+// handler wraps an unfiltered http.Handler but uses a filtered handler,
+// created on the fly, if filtering is requested. Create instances with
+// newHandler.
+type handler struct {
+	unfilteredHandler http.Handler
+	// exporterMetricsRegistry is a separate registry for the metrics about
+	// the exporter itself.
+	exporterMetricsRegistry *prometheus.Registry
+	includeExporterMetrics  bool
 }
 
 var cfg = new(config)
 var (
-	showVersion       = flag.Bool("version", false, "Print version information.")
 	configPath        = flag.String("config", "/opt/ss/ssm-client/node_exporter.conf", "Path of config file")
-	listenAddress     = flag.String("web.listen-address", ":9100", "Address on which to expose metrics and web interface.")
-	metricsPath       = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
 	enabledCollectors = flag.String("collectors.enabled", filterAvailableCollectors(defaultCollectors), "Comma-separated list of collectors to use.")
 	printCollectors   = flag.Bool("collectors.print", false, "If true, print available collectors and exit.")
 )
 
-func handler(w http.ResponseWriter, r *http.Request) {
+func newHandler(includeExporterMetrics bool) *handler {
+	h := &handler{
+		exporterMetricsRegistry: prometheus.NewRegistry(),
+		includeExporterMetrics:  includeExporterMetrics,
+	}
+	if h.includeExporterMetrics {
+		h.exporterMetricsRegistry.MustRegister(
+			prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
+			prometheus.NewGoCollector(),
+		)
+	}
+	if innerHandler, err := h.innerHandler(); err != nil {
+		log.Fatalf("Couldn't create metrics handler: %s", err)
+	} else {
+		h.unfilteredHandler = innerHandler
+	}
+	return h
+}
+
+// ServeHTTP implements http.Handler.
+func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	filters := r.URL.Query()["collect[]"]
 	log.Debugln("collect query:", filters)
 
+	if len(filters) == 0 {
+		// No filters, use the prepared unfiltered handler.
+		h.unfilteredHandler.ServeHTTP(w, r)
+		return
+	}
+	// To serve filtered metrics, we create a filtering handler on the fly.
+	filteredHandler, err := h.innerHandler(filters...)
+	if err != nil {
+		log.Warnln("Couldn't create filtered metrics handler:", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(fmt.Sprintf("Couldn't create filtered metrics handler: %s", err)))
+		return
+	}
+	filteredHandler.ServeHTTP(w, r)
+}
+
+// innerHandler is used to create buth the one unfiltered http.Handler to be
+// wrapped by the outer handler and also the filtered handlers created on the
+// fly. The former is accomplished by calling innerHandler without any arguments
+// (in which case it will log all the collectors enabled via command-line
+// flags).
+func (h *handler) innerHandler(filters ...string) (http.Handler, error) {
 	nc, err := collector.NewNodeCollector(filters...)
 	if err != nil {
-		log.Warnln("Couldn't create", err)
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(fmt.Sprintf("Couldn't create %s", err)))
-		return
+		return nil, fmt.Errorf("couldn't create collector: %s", err)
 	}
 
-	registry := prometheus.NewRegistry()
-	err = registry.Register(nc)
-	if err != nil {
-		log.Errorln("Couldn't register collector:", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(fmt.Sprintf("Couldn't register collector: %s", err)))
-		return
+	// Only log the creation of an unfiltered handler, which should happen
+	// only once upon startup.
+	if len(filters) == 0 {
+		log.Infof("Enabled collectors:")
+		collectors := []string{}
+		for n := range nc.Collectors {
+			collectors = append(collectors, n)
+		}
+		sort.Strings(collectors)
+		for _, n := range collectors {
+			log.Infof(" - %s", n)
+		}
 	}
 
-	gatherers := prometheus.Gatherers{
-		prometheus.DefaultGatherer,
-		registry,
+	r := prometheus.NewRegistry()
+	r.MustRegister(version.NewCollector("node_exporter"))
+	if err := r.Register(nc); err != nil {
+		return nil, fmt.Errorf("couldn't register node collector: %s", err)
 	}
-	// Delegate http serving to Prometheus client library, which will call collector.Collect.
-	h := promhttp.InstrumentMetricHandler(
-		registry,
-		promhttp.HandlerFor(gatherers,
-			promhttp.HandlerOpts{
-				ErrorLog:      log.NewErrorLogger(),
-				ErrorHandling: promhttp.ContinueOnError,
-			}),
+	handler := promhttp.HandlerFor(
+		prometheus.Gatherers{h.exporterMetricsRegistry, r},
+		promhttp.HandlerOpts{
+			ErrorLog:      log.NewErrorLogger(),
+			ErrorHandling: promhttp.ContinueOnError,
+		},
 	)
-	h.ServeHTTP(w, r)
+	if h.includeExporterMetrics {
+		// Note that we have to use h.exporterMetricsRegistry here to
+		// use the same promhttp metrics for all expositions.
+		handler = promhttp.InstrumentMetricHandler(
+			h.exporterMetricsRegistry, handler,
+		)
+	}
+	return handler, nil
 }
 
 func main() {
 	flag.Parse()
 	var (
-		listenAddress = kingpin.Flag("web.listen-address", "Address on which to expose metrics and web interface.").Default(":9100").String()
-		metricsPath   = kingpin.Flag("web.telemetry-path", "Path under which to expose metrics.").Default("/metrics").String()
+		listenAddress = kingpin.Flag(
+			"web.listen-address",
+			"Address on which to expose metrics and web interface.",
+		).Default(":9100").String()
+		metricsPath = kingpin.Flag(
+			"web.telemetry-path",
+			"Path under which to expose metrics.",
+		).Default("/metrics").String()
+		disableExporterMetrics = kingpin.Flag(
+			"web.disable-exporter-metrics",
+			"Exclude metrics about the exporter itself (promhttp_*, process_*, go_*).",
+		).Bool()
 	)
 
 	log.AddFlags(kingpin.CommandLine)
@@ -146,7 +210,7 @@ func main() {
 		log.Infof(" - %s", n)
 	}
 
-	http.HandleFunc(*metricsPath, handler)
+	http.Handle(*metricsPath, newHandler(!*disableExporterMetrics))
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
 			<head><title>Node Exporter</title></head>
@@ -157,9 +221,8 @@ func main() {
 			</html>`))
 	})
 
-	log.Infoln("Listening on", listenA)
-	err = http.ListenAndServe(listenA, nil)
-	if err != nil {
+	log.Infoln("Listening on", *listenAddress)
+	if err := http.ListenAndServe(*listenAddress, nil); err != nil {
 		log.Fatal(err)
 	}
 }
