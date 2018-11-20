@@ -43,6 +43,7 @@ type handler struct {
 	// the exporter itself.
 	exporterMetricsRegistry *prometheus.Registry
 	includeExporterMetrics  bool
+	maxRequests             int
 }
 
 var cfg = new(config)
@@ -52,10 +53,11 @@ var (
 	printCollectors   = flag.Bool("collectors.print", false, "If true, print available collectors and exit.")
 )
 
-func newHandler(includeExporterMetrics bool) *handler {
+func newHandler(includeExporterMetrics bool, maxRequests int) *handler {
 	h := &handler{
 		exporterMetricsRegistry: prometheus.NewRegistry(),
 		includeExporterMetrics:  includeExporterMetrics,
+		maxRequests:             maxRequests,
 	}
 	if h.includeExporterMetrics {
 		h.exporterMetricsRegistry.MustRegister(
@@ -125,8 +127,9 @@ func (h *handler) innerHandler(filters ...string) (http.Handler, error) {
 	handler := promhttp.HandlerFor(
 		prometheus.Gatherers{h.exporterMetricsRegistry, r},
 		promhttp.HandlerOpts{
-			ErrorLog:      log.NewErrorLogger(),
-			ErrorHandling: promhttp.ContinueOnError,
+			ErrorLog:            log.NewErrorLogger(),
+			ErrorHandling:       promhttp.ContinueOnError,
+			MaxRequestsInFlight: h.maxRequests,
 		},
 	)
 	if h.includeExporterMetrics {
@@ -154,6 +157,10 @@ func main() {
 			"web.disable-exporter-metrics",
 			"Exclude metrics about the exporter itself (promhttp_*, process_*, go_*).",
 		).Bool()
+		maxRequests = kingpin.Flag(
+			"web.max-requests",
+			"Maximum number of parallel scrape requests. Use 0 to disable.",
+		).Default("40").Int()
 	)
 
 	log.AddFlags(kingpin.CommandLine)
@@ -210,7 +217,7 @@ func main() {
 		log.Infof(" - %s", n)
 	}
 
-	http.Handle(*metricsPath, newHandler(!*disableExporterMetrics))
+	http.Handle(*metricsPath, newHandler(!*disableExporterMetrics, *maxRequests))
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
 			<head><title>Node Exporter</title></head>
