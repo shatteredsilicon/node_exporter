@@ -149,7 +149,6 @@ $(GOPATH)/bin/promu promu:
 .PHONY: promtool
 promtool: $(PROMTOOL)
 
-.PHONY: $(PROMTOOL)
 $(PROMTOOL):
 	$(eval PROMTOOL_TMP := $(shell mktemp -d))
 	curl -s -L $(PROMTOOL_URL) | tar -xvzf - -C $(PROMTOOL_TMP)
