@@ -18,12 +18,12 @@ require (
 	github.com/shatteredsilicon/exporter_shared v0.0.0-20180321061342-7d9e9cc0256a
 	golang.org/x/sys v0.17.0
 	gopkg.in/ini.v1 v1.67.0
+	github.com/godbus/dbus v0.0.0-20190402143921-271e53dc4968
 )
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
-	github.com/godbus/dbus v4.1.0+incompatible // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
