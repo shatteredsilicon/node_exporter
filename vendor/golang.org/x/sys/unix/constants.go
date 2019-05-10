@@ -3,6 +3,9 @@
 // license that can be found in the LICENSE file.
 
 // +build aix darwin dragonfly freebsd linux netbsd openbsd solaris
+// +build generate
+
+package registry
 
 package unix
 
