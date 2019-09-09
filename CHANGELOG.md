@@ -26,6 +26,7 @@
 * [BUGFIX] Strip path.rootfs from mountpoint labels #1421
 * [FEATURE] Add new thermal_zone collector #1425
 * [FEATURE] Add new cooling_device metrics to thermal zone collector #1445
+* [BUGFIX] Fix empty string in path.rootfs #1464
 
 ## 0.18.1 / 2019-06-04
 
