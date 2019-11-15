@@ -31,6 +31,7 @@ import (
 	"github.com/prometheus/node_exporter/collector"
 	"gopkg.in/ini.v1"
 
+	"github.com/prometheus/node_exporter/https"
 	"gopkg.in/alecthomas/kingpin.v2"
 )
 
@@ -162,6 +163,10 @@ func main() {
 			"web.max-requests",
 			"Maximum number of parallel scrape requests. Use 0 to disable.",
 		).Default("40").Int()
+		configFile = kingpin.Flag(
+			"web.config",
+			"Path to config yaml file that can enable TLS or authentication.",
+		).Default("").String()
 	)
 
 	log.AddFlags(kingpin.CommandLine)
@@ -230,7 +235,8 @@ func main() {
 	})
 
 	log.Infoln("Listening on", *listenAddress)
-	if err := http.ListenAndServe(*listenAddress, nil); err != nil {
+	server := &http.Server{Addr: *listenAddress}
+	if err := https.Listen(server, *configFile); err != nil {
 		log.Fatal(err)
 	}
 }
