@@ -163,35 +163,20 @@ func NewDiskstatsCollector() (Collector, error) {
 			},
 			{
 				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "discards_completed_total"),
-					"The total number of discards completed successfully. See https://www.kernel.org/doc/Documentation/iostats.txt.",
+					prometheus.BuildFQName(namespace, diskSubsystem, "flush_requests_total"),
+					"The total number of flush requests completed successfully",
 					diskLabelNames,
 					nil,
 				), valueType: prometheus.CounterValue,
 			},
 			{
 				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "discards_merged_total"),
-					"The total number of discards merged. See https://www.kernel.org/doc/Documentation/iostats.txt.",
+					prometheus.BuildFQName(namespace, diskSubsystem, "flush_requests_time_seconds_total"),
+					"This is the total number of seconds spent by all flush requests.",
 					diskLabelNames,
 					nil,
 				), valueType: prometheus.CounterValue,
-			},
-			{
-				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "discarded_sectors_total"),
-					"The total number of sectors discard successfully. See https://www.kernel.org/doc/Documentation/iostats.txt.",
-					diskLabelNames,
-					nil,
-				), valueType: prometheus.CounterValue,
-			},
-			{
-				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "discard_time_seconds_total"),
-					"This is the total number of seconds spent by all discards. See https://www.kernel.org/doc/Documentation/iostats.txt.",
-					diskLabelNames,
-					nil,
-				), valueType: prometheus.CounterValue,
+				factor: .001,
 			},
 		},
 	}, nil
