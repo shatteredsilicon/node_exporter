@@ -21,7 +21,8 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/godbus/dbus/v5"
+	"github.com/go-kit/kit/log"
+	"github.com/godbus/dbus"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -44,7 +45,9 @@ var (
 	)
 )
 
-type logindCollector struct{}
+type logindCollector struct {
+	logger log.Logger
+}
 
 type logindDbus struct {
 	conn   *dbus.Conn
@@ -83,8 +86,8 @@ func init() {
 }
 
 // NewLogindCollector returns a new Collector exposing logind statistics.
-func NewLogindCollector() (Collector, error) {
-	return &logindCollector{}, nil
+func NewLogindCollector(logger log.Logger) (Collector, error) {
+	return &logindCollector{logger}, nil
 }
 
 func (lc *logindCollector) Update(ch chan<- prometheus.Metric) error {

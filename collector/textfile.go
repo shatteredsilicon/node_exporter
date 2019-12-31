@@ -25,10 +25,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
-	"github.com/prometheus/common/log"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 )
 
@@ -45,7 +46,8 @@ var (
 type textFileCollector struct {
 	path string
 	// Only set for testing to get predictable output.
-	mtime *float64
+	mtime  *float64
+	logger log.Logger
 }
 
 func init() {
@@ -54,14 +56,15 @@ func init() {
 
 // NewTextFileCollector returns a new Collector exposing metrics read from files
 // in the given textfile directory.
-func NewTextFileCollector() (Collector, error) {
+func NewTextFileCollector(logger log.Logger) (Collector, error) {
 	c := &textFileCollector{
-		path: *textFileDirectory,
+		path:   *textFileDirectory,
+		logger: logger,
 	}
 	return c, nil
 }
 
-func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Metric) {
+func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Metric, logger log.Logger) {
 	var valType prometheus.ValueType
 	var val float64
 
@@ -77,7 +80,7 @@ func convertMetricFamily(metricFamily *dto.MetricFamily, ch chan<- prometheus.Me
 
 	for _, metric := range metricFamily.Metric {
 		if metric.TimestampMs != nil {
-			log.Warnf("Ignoring unsupported custom timestamp on textfile collector metric %v", metric)
+			level.Warn(logger).Log("msg", "Ignoring unsupported custom timestamp on textfile collector metric", "metric", metric)
 		}
 
 		labels := metric.GetLabel()
@@ -192,7 +195,7 @@ func (c *textFileCollector) Update(ch chan<- prometheus.Metric) error {
 	files, err := ioutil.ReadDir(c.path)
 	if err != nil && c.path != "" {
 		errored = true
-		log.Errorf("failed to read textfile collector directory %q: %v", c.path, err)
+		level.Error(c.logger).Log("msg", "failed to read textfile collector directory", "path", c.path, "err", err)
 	}
 
 	mtimes := make(map[string]time.Time, len(files))
@@ -204,7 +207,7 @@ func (c *textFileCollector) Update(ch chan<- prometheus.Metric) error {
 		mtime, err := c.processFile(f.Name(), ch)
 		if err != nil {
 			errored = true
-			log.Errorf("failed to collect textfile data from %q: %v", f.Name(), err)
+			level.Error(c.logger).Log("msg", "failed to collect textfile data", "file", f.Name(), "err", err)
 			continue
 		}
 
@@ -258,7 +261,7 @@ func (c *textFileCollector) processFile(name string, ch chan<- prometheus.Metric
 	}
 
 	for _, mf := range families {
-		convertMetricFamily(mf, ch)
+		convertMetricFamily(mf, ch, c.logger)
 	}
 
 	// Only stat the file once it has been parsed and validated, so that

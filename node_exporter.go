@@ -24,9 +24,13 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/prometheus/common/promlog"
+	"github.com/prometheus/common/promlog/flag"
+
+	"github.com/go-kit/kit/log"
+	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/prometheus/common/log"
 	"github.com/prometheus/common/version"
 	"github.com/prometheus/node_exporter/collector"
 	"gopkg.in/ini.v1"
@@ -45,6 +49,7 @@ type handler struct {
 	exporterMetricsRegistry *prometheus.Registry
 	includeExporterMetrics  bool
 	maxRequests             int
+	logger                  log.Logger
 }
 
 var cfg = new(config)
@@ -54,11 +59,12 @@ var (
 	printCollectors   = flag.Bool("collectors.print", false, "If true, print available collectors and exit.")
 )
 
-func newHandler(includeExporterMetrics bool, maxRequests int) *handler {
+func newHandler(includeExporterMetrics bool, maxRequests int, logger log.Logger) *handler {
 	h := &handler{
 		exporterMetricsRegistry: prometheus.NewRegistry(),
 		includeExporterMetrics:  includeExporterMetrics,
 		maxRequests:             maxRequests,
+		logger:                  logger,
 	}
 	if h.includeExporterMetrics {
 		h.exporterMetricsRegistry.MustRegister(
@@ -67,7 +73,7 @@ func newHandler(includeExporterMetrics bool, maxRequests int) *handler {
 		)
 	}
 	if innerHandler, err := h.innerHandler(); err != nil {
-		log.Fatalf("Couldn't create metrics handler: %s", err)
+		panic(fmt.Sprintf("Couldn't create metrics handler: %s", err))
 	} else {
 		h.unfilteredHandler = innerHandler
 	}
@@ -77,7 +83,7 @@ func newHandler(includeExporterMetrics bool, maxRequests int) *handler {
 // ServeHTTP implements http.Handler.
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	filters := r.URL.Query()["collect[]"]
-	log.Debugln("collect query:", filters)
+	level.Debug(h.logger).Log("msg", "collect query:", "filters", filters)
 
 	if len(filters) == 0 {
 		// No filters, use the prepared unfiltered handler.
@@ -87,7 +93,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// To serve filtered metrics, we create a filtering handler on the fly.
 	filteredHandler, err := h.innerHandler(filters...)
 	if err != nil {
-		log.Warnln("Couldn't create filtered metrics handler:", err)
+		level.Warn(h.logger).Log("msg", "Couldn't create filtered metrics handler:", "err", err)
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(fmt.Sprintf("Couldn't create filtered metrics handler: %s", err)))
 		return
@@ -95,13 +101,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	filteredHandler.ServeHTTP(w, r)
 }
 
-// innerHandler is used to create buth the one unfiltered http.Handler to be
+// innerHandler is used to create both the one unfiltered http.Handler to be
 // wrapped by the outer handler and also the filtered handlers created on the
 // fly. The former is accomplished by calling innerHandler without any arguments
 // (in which case it will log all the collectors enabled via command-line
 // flags).
 func (h *handler) innerHandler(filters ...string) (http.Handler, error) {
-	nc, err := collector.NewNodeCollector(filters...)
+	nc, err := collector.NewNodeCollector(h.logger, filters...)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't create collector: %s", err)
 	}
@@ -109,14 +115,14 @@ func (h *handler) innerHandler(filters ...string) (http.Handler, error) {
 	// Only log the creation of an unfiltered handler, which should happen
 	// only once upon startup.
 	if len(filters) == 0 {
-		log.Infof("Enabled collectors:")
+		level.Info(h.logger).Log("msg", "Enabled collectors")
 		collectors := []string{}
 		for n := range nc.Collectors {
 			collectors = append(collectors, n)
 		}
 		sort.Strings(collectors)
-		for _, n := range collectors {
-			log.Infof(" - %s", n)
+		for _, c := range collectors {
+			level.Info(h.logger).Log("collector", c)
 		}
 	}
 
@@ -128,7 +134,6 @@ func (h *handler) innerHandler(filters ...string) (http.Handler, error) {
 	handler := promhttp.HandlerFor(
 		prometheus.Gatherers{h.exporterMetricsRegistry, r},
 		promhttp.HandlerOpts{
-			ErrorLog:            log.NewErrorLogger(),
 			ErrorHandling:       promhttp.ContinueOnError,
 			MaxRequestsInFlight: h.maxRequests,
 			Registry:            h.exporterMetricsRegistry,
@@ -169,10 +174,12 @@ func main() {
 		).Default("").String()
 	)
 
-	log.AddFlags(kingpin.CommandLine)
+	promlogConfig := &promlog.Config{}
+	flag.AddFlags(kingpin.CommandLine, promlogConfig)
 	kingpin.Version(version.Print("node_exporter"))
 	kingpin.HelpFlag.Short('h')
 	kingpin.Parse()
+	logger := promlog.New(promlogConfig)
 
 	if os.Getenv("ON_CONFIGURE") == "1" {
 		err := configure()
@@ -223,7 +230,10 @@ func main() {
 		log.Infof(" - %s", n)
 	}
 
-	http.Handle(*metricsPath, newHandler(!*disableExporterMetrics, *maxRequests))
+	level.Info(logger).Log("msg", "Starting node_exporter", "version", version.Info())
+	level.Info(logger).Log("msg", "Build context", "build_context", version.BuildContext())
+
+	http.Handle(*metricsPath, newHandler(!*disableExporterMetrics, *maxRequests, logger))
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
 			<head><title>Node Exporter</title></head>
@@ -234,10 +244,11 @@ func main() {
 			</html>`))
 	})
 
-	log.Infoln("Listening on", *listenAddress)
+	level.Info(logger).Log("msg", "Listening on", "address", *listenAddress)
 	server := &http.Server{Addr: *listenAddress}
 	if err := https.Listen(server, *configFile); err != nil {
-		log.Fatal(err)
+		level.Error(logger).Log("err", err)
+		os.Exit(1)
 	}
 }
 
