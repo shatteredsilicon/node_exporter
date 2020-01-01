@@ -36,6 +36,7 @@
 * [FEATURE] Add new cooling_device metrics to thermal zone collector #1445
 * [BUGFIX] Fix empty string in path.rootfs #1464
 * [BUGFIX] Fix typo in cpufreq metric names #1510
+* [BUGFIX] Fix network speed math #1580
 
 ## 0.18.1 / 2019-06-04
 
