@@ -206,6 +206,18 @@ As a general rule of thumb, please try to create bug reports that are:
 - *Unique.* Do not duplicate existing tickets.
 - *Scoped to a Single Bug.* One bug per report.
 
+## TLS endpoint
+
+** EXPERIMENTAL **
+
+The exporter supports TLS via a new web configuration file.
+
+```console
+./node_exporter --web.config=web-config.yml
+```
+
+See the [https package](https/README.md) for more details.
+
 ## Using Docker
 The `node_exporter` is designed to monitor the host system. It's not recommended
 to deploy it as a Docker container because it requires access to the host system.
