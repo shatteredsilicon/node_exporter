@@ -35,7 +35,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/version"
-	"github.com/prometheus/exporter-toolkit/https"
+	"github.com/prometheus/exporter-toolkit/web"
 	"github.com/prometheus/node_exporter/collector"
 	"gopkg.in/ini.v1"
 
@@ -256,7 +256,7 @@ func main() {
 
 	level.Info(logger).Log("msg", "Listening on", "address", *listenAddress)
 	server := &http.Server{Addr: *listenAddress}
-	if err := https.Listen(server, *configFile, logger); err != nil {
+	if err := web.ListenAndServe(server, *configFile, logger); err != nil {
 		level.Error(logger).Log("err", err)
 		os.Exit(1)
 	}
