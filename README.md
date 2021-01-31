@@ -20,6 +20,8 @@ This fork adds HTTP Basic authentication and TLS support using [Percona's shared
 
 If you are new to Prometheus and `node_exporter` there is a [simple step-by-step guide](https://prometheus.io/docs/guides/node-exporter/).
 
+The `node_exporter` listens on HTTP port 9100 by default. See the `--help` output for more options.
+
 ### Ansible
 
 For automated installs with [Ansible](https://www.ansible.com/), there is the [Cloud Alchemy role](https://github.com/cloudalchemy/ansible-node-exporter).
