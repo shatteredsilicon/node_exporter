@@ -159,12 +159,43 @@ func NewDiskstatsCollector() (Collector, error) {
 					nil,
 				), valueType: prometheus.CounterValue,
 			},
+			{
+				desc: prometheus.NewDesc(
+					prometheus.BuildFQName(Namespace, diskSubsystem, "discards_completed_total"),
+					"The total number of discards completed successfully. See https://www.kernel.org/doc/Documentation/iostats.txt.",
+					diskLabelNames,
+					nil,
+				), valueType: prometheus.CounterValue,
+			},
+			{
+				desc: prometheus.NewDesc(
+					prometheus.BuildFQName(Namespace, diskSubsystem, "discards_merged_total"),
+					"The total number of discards merged. See https://www.kernel.org/doc/Documentation/iostats.txt.",
+					diskLabelNames,
+					nil,
+				), valueType: prometheus.CounterValue,
+			},
+			{
+				desc: prometheus.NewDesc(
+					prometheus.BuildFQName(Namespace, diskSubsystem, "discarded_sectors_total"),
+					"The total number of sectors discard successfully. See https://www.kernel.org/doc/Documentation/iostats.txt.",
+					diskLabelNames,
+					nil,
+				), valueType: prometheus.CounterValue,
+			},
+			{
+				desc: prometheus.NewDesc(
+					prometheus.BuildFQName(Namespace, diskSubsystem, "discard_time_seconds_total"),
+					"This is the total number of seconds spent by all discards. See https://www.kernel.org/doc/Documentation/iostats.txt.",
+					diskLabelNames,
+					nil,
+				), valueType: prometheus.CounterValue,
+			},
 		},
 	}, nil
 }
 
 func (c *diskstatsCollector) Update(ch chan<- prometheus.Metric) error {
-	procDiskStats := procFilePath("diskstats")
 	diskStats, err := getDiskStats()
 	if err != nil {
 		return fmt.Errorf("couldn't get diskstats: %s", err)
@@ -176,8 +207,8 @@ func (c *diskstatsCollector) Update(ch chan<- prometheus.Metric) error {
 			continue
 		}
 
-		if len(stats) != len(c.descs) {
-			return fmt.Errorf("invalid line for %s for %s", procDiskStats, dev)
+		if len(stats) > len(c.descs) {
+			return fmt.Errorf("invalid line for %s for %s", procFilePath("diskstats"), dev)
 		}
 
 		for i, value := range stats {
