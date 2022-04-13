@@ -85,7 +85,9 @@ docker:
 	@docker build -t "$(DOCKER_IMAGE_NAME):$(DOCKER_IMAGE_TAG)" .
 
 $(GOPATH)/bin/promu promu:
-	@GOOS= GOARCH= $(GO) get -u github.com/prometheus/promu
+	mkdir -p $(GOPATH)/src/github.com/prometheus/
+	git clone -b v0.1.0 https://github.com/prometheus/promu.git $(GOPATH)/src/github.com/prometheus/promu
+	@GOOS= GOARCH= $(GO) install $(GOPATH)/src/github.com/prometheus/promu
 
 $(GOPATH)/bin/staticcheck:
 	@GOOS= GOARCH= $(GO) get -u honnef.co/go/tools/cmd/staticcheck

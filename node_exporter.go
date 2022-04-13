@@ -30,7 +30,7 @@ import (
 	"github.com/prometheus/common/version"
 	"github.com/prometheus/node_exporter/collector"
 
-	"github.com/percona/exporter_shared"
+	"github.com/shatteredsilicon/exporter_shared"
 )
 
 const (

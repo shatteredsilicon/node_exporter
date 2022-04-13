@@ -1,10 +1,7 @@
+required = ["github.com/prometheus/promu"]
+
 # This is a fork of github.com/prometheus/node_exporter/collector.
 ignored = ["github.com/prometheus/node_exporter*"]
-
-[prune]
-  go-tests = true
-  non-go = true
-  unused-packages = true
 
 [[constraint]]
   name = "github.com/mdlayher/wifi"
@@ -23,3 +20,23 @@ ignored = ["github.com/prometheus/node_exporter*"]
   # Version before introducing kingpin.
   # https://github.com/prometheus/common/pull/96
   revision = "185c63bfc5a8c7a703687edb52940c895c818cb5"
+
+[[override]]
+  name = "github.com/prometheus/promu"
+  version = "=v0.1.0"
+
+[[override]]
+  name = "github.com/spf13/viper"
+  version = "=v1.0.3"
+
+[[override]]
+  name = "github.com/coreos/go-systemd"
+  version = "=v21"
+
+[[override]]
+  name = "github.com/prometheus/procfs"
+  revision = "7d6f385de8bea29190f15ba9931442a0eaef9af7"
+
+[[override]]
+  name = "github.com/shatteredsilicon/exporter_shared"
+  revision = "7d9e9cc0256a3fbb559aa2f3fb9d8d37e3bd1bf5"
