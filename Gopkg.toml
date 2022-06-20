@@ -11,6 +11,10 @@ ignored = ["github.com/prometheus/node_exporter*"]
   name = "github.com/prometheus/client_golang"
   revision = "aace68cde27da90f76be50fcb9937d67fd6a1968"
 
+[[constraint]]
+  name = "github.com/prometheus/promu"
+  version = "=v0.1.0"
+
 [[override]]
   name = "github.com/mdlayher/netlink"
   revision = "1291b75abe0cc0cb335f110466bf1f02590c916d"
@@ -20,10 +24,6 @@ ignored = ["github.com/prometheus/node_exporter*"]
   # Version before introducing kingpin.
   # https://github.com/prometheus/common/pull/96
   revision = "185c63bfc5a8c7a703687edb52940c895c818cb5"
-
-[[override]]
-  name = "github.com/prometheus/promu"
-  version = "=v0.1.0"
 
 [[override]]
   name = "github.com/spf13/viper"
