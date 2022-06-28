@@ -122,6 +122,7 @@ powersupplyclass | Exposes Power Supply statistics from `/sys/class/power_supply
 pressure | Exposes pressure stall statistics from `/proc/pressure/`. | Linux (kernel 4.20+ and/or [CONFIG\_PSI](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/Documentation/accounting/psi.txt))
 rapl | Exposes various statistics from `/sys/class/powercap`. | Linux
 schedstat | Exposes task scheduler statistics from `/proc/schedstat`. | Linux
+selinux | Exposes SELinux statistics. | Linux
 sockstat | Exposes various statistics from `/proc/net/sockstat`. | Linux
 softnet | Exposes statistics from `/proc/net/softnet_stat`. | Linux
 stat | Exposes various statistics from `/proc/stat`. This includes boot time, forks and interrupts. | Linux
