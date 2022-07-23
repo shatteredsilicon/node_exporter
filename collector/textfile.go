@@ -11,6 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !notextfile
 // +build !notextfile
 
 package collector
@@ -33,7 +34,7 @@ import (
 )
 
 var (
-	textFileDirectory = flag.String("collector.textfile.directory", "/usr/local/percona/pmm-client/textfile-collector", "Directory to read text files with metrics from.")
+	textFileDirectory = flag.String("collector.textfile.directory", "/opt/ss/ssm-client/textfile-collector", "Directory to read text files with metrics from.")
 )
 
 type textFileCollector struct {
