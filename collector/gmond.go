@@ -11,6 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !nogmond
 // +build !nogmond
 
 package collector
@@ -26,7 +27,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/log"
-	"github.com/prometheus/node_exporter/collector/ganglia"
+	"github.com/shatteredsilicon/node_exporter/collector/ganglia"
 )
 
 const (
