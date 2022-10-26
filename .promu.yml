@@ -5,6 +5,8 @@ repository:
 build:
     flags: -a -tags 'netgo static_build'
     ldflags: |
+        -s
+        -w
         -X {{repoPath}}/vendor/github.com/prometheus/common/version.Version={{.Version}}
         -X {{repoPath}}/vendor/github.com/prometheus/common/version.Revision={{.Revision}}
         -X {{repoPath}}/vendor/github.com/prometheus/common/version.Branch={{.Branch}}
