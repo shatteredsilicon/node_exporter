@@ -19,6 +19,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -29,6 +30,7 @@ import (
 	"github.com/prometheus/common/log"
 	"github.com/prometheus/common/version"
 	"github.com/prometheus/node_exporter/collector"
+	"gopkg.in/ini.v1"
 
 	"github.com/shatteredsilicon/exporter_shared"
 )
@@ -124,14 +126,17 @@ func init() {
 	prometheus.MustRegister(version.NewCollector("node_exporter"))
 }
 
+var cfg = new(config)
+var (
+	showVersion       = flag.Bool("version", false, "Print version information.")
+	configPath        = flag.String("config", "/opt/ss/ssm-client/node_exporter.conf", "Path of config file")
+	listenAddress     = flag.String("web.listen-address", ":9100", "Address on which to expose metrics and web interface.")
+	metricsPath       = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
+	enabledCollectors = flag.String("collectors.enabled", filterAvailableCollectors(defaultCollectors), "Comma-separated list of collectors to use.")
+	printCollectors   = flag.Bool("collectors.print", false, "If true, print available collectors and exit.")
+)
+
 func main() {
-	var (
-		showVersion       = flag.Bool("version", false, "Print version information.")
-		listenAddress     = flag.String("web.listen-address", ":9100", "Address on which to expose metrics and web interface.")
-		metricsPath       = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
-		enabledCollectors = flag.String("collectors.enabled", filterAvailableCollectors(defaultCollectors), "Comma-separated list of collectors to use.")
-		printCollectors   = flag.Bool("collectors.print", false, "If true, print available collectors and exit.")
-	)
 	flag.Parse()
 
 	if *showVersion {
@@ -139,10 +144,19 @@ func main() {
 		os.Exit(0)
 	}
 
+	err := ini.MapTo(cfg, *configPath)
+	if err != nil {
+		log.Fatal(fmt.Sprintf("Load config file %s failed: %s", *configPath, err.Error()))
+	}
+
 	log.Infoln("Starting node_exporter", version.Info())
 	log.Infoln("Build context", version.BuildContext())
 
-	if *printCollectors {
+	// set flags for exporter_shared server
+	flag.Set("web.ssl-cert-file", lookupConfig("web.ssl-cert-file", "").(string))
+	flag.Set("web.ssl-key-file", lookupConfig("web.ssl-key-file", "").(string))
+
+	if lookupConfig("collectors.print", *printCollectors).(bool) {
 		collectorNames := make(sort.StringSlice, 0, len(collector.Factories))
 		for n := range collector.Factories {
 			collectorNames = append(collectorNames, n)
@@ -154,7 +168,7 @@ func main() {
 		}
 		return
 	}
-	collectors, err := loadCollectors(*enabledCollectors)
+	collectors, err := loadCollectors(lookupConfig("collectors.enabled", *enabledCollectors).(string))
 	if err != nil {
 		log.Fatalf("Couldn't load collectors: %s", err)
 	}
@@ -169,7 +183,9 @@ func main() {
 	}
 
 	// Use our shared code to run server and exit on error. Upstream's code below will not be executed.
-	exporter_shared.RunServer("Node", *listenAddress, *metricsPath, promhttp.ContinueOnError)
+	listenA := lookupConfig("web.listen-address", *listenAddress).(string)
+	metricsP := lookupConfig("web.telemetry-path", *metricsPath).(string)
+	exporter_shared.RunServer("Node", listenA, metricsP, promhttp.ContinueOnError)
 
 	handler := promhttp.HandlerFor(prometheus.DefaultGatherer,
 		promhttp.HandlerOpts{
@@ -178,20 +194,111 @@ func main() {
 		})
 
 	// TODO(ts): Remove deprecated and problematic InstrumentHandler usage.
-	http.Handle(*metricsPath, prometheus.InstrumentHandler("prometheus", handler))
+	http.Handle(metricsP, prometheus.InstrumentHandler("prometheus", handler))
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
 			<head><title>Node Exporter</title></head>
 			<body>
 			<h1>Node Exporter</h1>
-			<p><a href="` + *metricsPath + `">Metrics</a></p>
+			<p><a href="` + metricsP + `">Metrics</a></p>
 			</body>
 			</html>`))
 	})
 
-	log.Infoln("Listening on", *listenAddress)
-	err = http.ListenAndServe(*listenAddress, nil)
+	log.Infoln("Listening on", listenA)
+	err = http.ListenAndServe(listenA, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+type config struct {
+	WebConfig        webConfig        `ini:"web"`
+	CollectorsConfig collectorsConfig `ini:"collectors"`
+}
+
+type webConfig struct {
+	ListenAddress string `ini:"listen-address"`
+	MetricsPath   string `ini:"telemetry-path"`
+	SSLCertFile   string `ini:"ssl-cert-file"`
+	SSLKeyFile    string `ini:"ssl-key-file"`
+}
+
+type collectorsConfig struct {
+	Enabled string `ini:"enabled"`
+	Print   bool   `ini:"print"`
+}
+
+// lookupConfig lookup config from flag
+// or config by name, returns nil if none exists.
+// name should be in this format -> '[section].[key]'
+func lookupConfig(name string, defaultValue interface{}) interface{} {
+	var flagSet bool
+	var flagValue interface{}
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			flagSet = true
+			switch reflect.Indirect(reflect.ValueOf(f.Value)).Kind() {
+			case reflect.Bool:
+				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Bool()
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Int()
+			case reflect.Float32, reflect.Float64:
+				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Float()
+			case reflect.String:
+				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).String()
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Uint()
+			}
+		}
+	})
+	if flagSet {
+		return flagValue
+	}
+
+	section := ""
+	key := name
+	if i := strings.Index(name, "."); i > 0 {
+		section = name[0:i]
+		if len(name) > i+1 {
+			key = name[i+1:]
+		} else {
+			key = ""
+		}
+	}
+
+	t := reflect.TypeOf(*cfg)
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		iniName := field.Tag.Get("ini")
+		matched := iniName == section
+		if section == "" {
+			matched = iniName == key
+		}
+		if !matched {
+			continue
+		}
+
+		v := reflect.ValueOf(cfg).Elem().Field(i)
+		if section == "" {
+			return v.Interface()
+		}
+
+		if !v.CanAddr() {
+			continue
+		}
+
+		st := reflect.TypeOf(v.Interface())
+		for j := 0; j < st.NumField(); j++ {
+			sectionField := st.Field(j)
+			sectionININame := sectionField.Tag.Get("ini")
+			if sectionININame != key {
+				continue
+			}
+
+			return v.Addr().Elem().Field(j).Interface()
+		}
+	}
+
+	return defaultValue
 }

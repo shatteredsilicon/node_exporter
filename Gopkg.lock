@@ -358,6 +358,14 @@
   version = "v1.28.0"
 
 [[projects]]
+  digest = "1:2f904c2240866c389c08c110095971eebfc25feecedd6c4339896f486b866038"
+  name = "gopkg.in/ini.v1"
+  packages = ["."]
+  pruneopts = ""
+  revision = "b2f570e5b5b844226bbefe6fb521d891f529a951"
+  version = "v1.67.0"
+
+[[projects]]
   digest = "1:ee05f739e27c55032bf797e28915dd209b07f5b46d098cdf115cacfd3b179fe4"
   name = "gopkg.in/yaml.v2"
   packages = ["."]
@@ -386,6 +394,7 @@
     "github.com/shatteredsilicon/exporter_shared",
     "github.com/soundcloud/go-runit/runit",
     "golang.org/x/sys/unix",
+    "gopkg.in/ini.v1",
   ]
   solver-name = "gps-cdcl"
   solver-version = 1
