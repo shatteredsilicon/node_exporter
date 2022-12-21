@@ -31,3 +31,5 @@ dependencies-stamp
 
 /.idea
 *.iml
+
+vendor/
