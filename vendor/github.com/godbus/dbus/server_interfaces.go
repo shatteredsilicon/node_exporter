@@ -63,7 +63,7 @@ type Method interface {
 // any other decoding scheme.
 type ArgumentDecoder interface {
 	// To decode the arguments of a method the sender and message are
-	// provided incase the semantics of the implementer provides access
+	// provided in case the semantics of the implementer provides access
 	// to these as part of the method invocation.
 	DecodeArguments(conn *Conn, sender string, msg *Message, args []interface{}) ([]interface{}, error)
 }
@@ -77,6 +77,14 @@ type SignalHandler interface {
 	DeliverSignal(iface, name string, signal *Signal)
 }
 
+// SignalRegistrar manages signal delivery channels.
+//
+// This is an optional set of methods for `SignalHandler`.
+type SignalRegistrar interface {
+	AddSignal(ch chan<- *Signal)
+	RemoveSignal(ch chan<- *Signal)
+}
+
 // A DBusError is used to convert a generic object to a D-Bus error.
 //
 // Any custom error mechanism may implement this interface to provide
@@ -86,4 +94,14 @@ type SignalHandler interface {
 // interface as well a custom encoding may be provided.
 type DBusError interface {
 	DBusError() (string, []interface{})
+}
+
+// SerialGenerator is responsible for serials generation.
+//
+// Different approaches for the serial generation can be used,
+// maintaining a map guarded with a mutex (the standard way) or
+// simply increment an atomic counter.
+type SerialGenerator interface {
+	GetSerial() uint32
+	RetireSerial(serial uint32)
 }
