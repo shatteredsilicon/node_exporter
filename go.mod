@@ -31,6 +31,7 @@ require (
 	golang.org/x/exp v0.0.0-20230213192124-5e25df0256eb
 	golang.org/x/sys v0.6.0
 	github.com/prometheus/promu v0.2.0
+	howett.net/plist v1.0.0
 )
 
 require (
