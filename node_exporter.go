@@ -21,6 +21,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -144,6 +145,14 @@ func main() {
 		os.Exit(0)
 	}
 
+	if os.Getenv("ON_CONFIGURE") == "1" {
+		err := configure()
+		if err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	err := ini.MapTo(cfg, *configPath)
 	if err != nil {
 		log.Fatal(fmt.Sprintf("Load config file %s failed: %s", *configPath, err.Error()))
@@ -233,25 +242,7 @@ type collectorsConfig struct {
 // or config by name, returns nil if none exists.
 // name should be in this format -> '[section].[key]'
 func lookupConfig(name string, defaultValue interface{}) interface{} {
-	var flagSet bool
-	var flagValue interface{}
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == name {
-			flagSet = true
-			switch reflect.Indirect(reflect.ValueOf(f.Value)).Kind() {
-			case reflect.Bool:
-				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Bool()
-			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Int()
-			case reflect.Float32, reflect.Float64:
-				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Float()
-			case reflect.String:
-				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).String()
-			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Uint()
-			}
-		}
-	})
+	flagSet, flagValue := lookupFlag(name)
 	if flagSet {
 		return flagValue
 	}
@@ -301,4 +292,93 @@ func lookupConfig(name string, defaultValue interface{}) interface{} {
 	}
 
 	return defaultValue
+}
+
+func lookupFlag(name string) (flagSet bool, flagValue interface{}) {
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			flagSet = true
+			switch reflect.Indirect(reflect.ValueOf(f.Value)).Kind() {
+			case reflect.Bool:
+				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Bool()
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Int()
+			case reflect.Float32, reflect.Float64:
+				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Float()
+			case reflect.String:
+				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).String()
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Uint()
+			}
+		}
+	})
+
+	return
+}
+
+func configure() error {
+	iniCfg, err := ini.Load(*configPath)
+	if err != nil {
+		return err
+	}
+
+	if err = iniCfg.MapTo(cfg); err != nil {
+		return err
+	}
+
+	type item struct {
+		value   reflect.Value
+		section string
+	}
+
+	items := []item{
+		{
+			value:   reflect.ValueOf(cfg).Elem(),
+			section: "",
+		},
+	}
+	for i := 0; i < len(items); i++ {
+		for j := 0; j < items[i].value.Type().NumField(); j++ {
+			fieldValue := items[i].value.Field(j)
+			fieldType := items[i].value.Type().Field(j)
+			section := items[i].section
+			key := fieldType.Tag.Get("ini")
+
+			if fieldValue.Kind() == reflect.Struct {
+				if fieldValue.CanAddr() && section == "" {
+					items = append(items, item{
+						value:   fieldValue.Addr().Elem(),
+						section: key,
+					})
+				}
+				continue
+			}
+
+			flagSet, flagValue := lookupFlag(fmt.Sprintf("%s.%s", section, key))
+			if !flagSet {
+				continue
+			}
+
+			if fieldValue.IsValid() && fieldValue.CanSet() {
+				switch fieldValue.Kind() {
+				case reflect.Bool:
+					iniCfg.Section(section).Key(key).SetValue(fmt.Sprintf("%t", flagValue.(bool)))
+				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+					iniCfg.Section(section).Key(key).SetValue(fmt.Sprintf("%d", flagValue.(int64)))
+				case reflect.Float32, reflect.Float64:
+					iniCfg.Section(section).Key(key).SetValue(fmt.Sprintf("%f", flagValue.(float64)))
+				case reflect.String:
+					iniCfg.Section(section).Key(key).SetValue(strconv.Quote(flagValue.(string)))
+				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+					iniCfg.Section(section).Key(key).SetValue(fmt.Sprintf("%d", flagValue.(uint64)))
+				}
+			}
+		}
+	}
+
+	if err = iniCfg.SaveTo(*configPath); err != nil {
+		return err
+	}
+
+	return nil
 }
