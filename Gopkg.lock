@@ -220,14 +220,6 @@
   version = "v1.8.1"
 
 [[projects]]
-  branch = "master"
-  digest = "1:13b8d39cbf835ee8279f4df8b8376d85783293f0e5f057e0b8d8b73146aa8c31"
-  name = "github.com/soundcloud/go-runit"
-  packages = ["runit"]
-  pruneopts = ""
-  revision = "06ad41a06c4a586951fb8040a697ecd39729640b"
-
-[[projects]]
   digest = "1:301f40b25f760205363098c1da7e58d4b9aaa2cd4f9beea47ff3797996254f9e"
   name = "github.com/spf13/afero"
   packages = [
@@ -392,7 +384,6 @@
     "github.com/prometheus/procfs",
     "github.com/prometheus/promu",
     "github.com/shatteredsilicon/exporter_shared",
-    "github.com/soundcloud/go-runit/runit",
     "golang.org/x/sys/unix",
     "gopkg.in/ini.v1",
   ]
