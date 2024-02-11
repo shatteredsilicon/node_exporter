@@ -11,6 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !nologind
 // +build !nologind
 
 package collector
@@ -20,7 +21,7 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/godbus/dbus"
+	"github.com/godbus/dbus/v5"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
