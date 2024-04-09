@@ -11,25 +11,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !nohwmon
 // +build !nohwmon
 
 package collector
 
 import (
 	"errors"
-	"io/ioutil"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/alecthomas/kingpin/v2"
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/common/log"
+	"golang.org/x/sys/unix"
 )
 
 var (
+	collectorHWmonChipInclude = kingpin.Flag("collector.hwmon.chip-include", "Regexp of hwmon chip to include (mutually exclusive to device-exclude).").String()
+	collectorHWmonChipExclude = kingpin.Flag("collector.hwmon.chip-exclude", "Regexp of hwmon chip to exclude (mutually exclusive to device-include).").String()
+
 	hwmonInvalidMetricChars = regexp.MustCompile("[^a-z0-9:_]")
 	hwmonFilenameFormat     = regexp.MustCompile(`^(?P<type>[^0-9]+)(?P<id>[0-9]*)?(_(?P<property>.+))?$`)
 	hwmonLabelDesc          = []string{"chip", "sensor"}
@@ -41,16 +46,29 @@ var (
 	}
 )
 
-func init() {
-	Factories["hwmon"] = NewHwMonCollector
+type HWmonConfig struct {
+	Enabled     bool   `ini:"hwmon"`
+	ChipInclude string `ini:"hwmon.chip-include"`
+	ChipExclude string `ini:"hwmon.chip-exclude"`
 }
 
-type hwMonCollector struct{}
+func init() {
+	registerCollector("hwmon", defaultEnabled, NewHwMonCollector)
+}
+
+type hwMonCollector struct {
+	deviceFilter deviceFilter
+	logger       log.Logger
+}
 
 // NewHwMonCollector returns a new Collector exposing /sys/class/hwmon stats
 // (similar to lm-sensors).
-func NewHwMonCollector() (Collector, error) {
-	return &hwMonCollector{}, nil
+func NewHwMonCollector(logger log.Logger) (Collector, error) {
+
+	return &hwMonCollector{
+		logger:       logger,
+		deviceFilter: newDeviceFilter(*collectorHWmonChipExclude, *collectorHWmonChipInclude),
+	}, nil
 }
 
 func cleanMetricName(name string) string {
@@ -61,8 +79,8 @@ func cleanMetricName(name string) string {
 }
 
 func addValueFile(data map[string]map[string]string, sensor string, prop string, file string) {
-	raw, e := ioutil.ReadFile(file)
-	if e != nil {
+	raw, err := sysReadFile(file)
+	if err != nil {
 		return
 	}
 	value := strings.Trim(string(raw), "\n")
@@ -72,6 +90,28 @@ func addValueFile(data map[string]map[string]string, sensor string, prop string,
 	}
 
 	data[sensor][prop] = value
+}
+
+// sysReadFile is a simplified os.ReadFile that invokes syscall.Read directly.
+func sysReadFile(file string) ([]byte, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	// On some machines, hwmon drivers are broken and return EAGAIN.  This causes
+	// Go's os.ReadFile implementation to poll forever.
+	//
+	// Since we either want to read data or bail immediately, do the simplest
+	// possible read using system call directly.
+	b := make([]byte, 128)
+	n, err := unix.Read(int(f.Fd()), b)
+	if err != nil {
+		return nil, err
+	}
+
+	return b[:n], nil
 }
 
 // explodeSensorFilename splits a sensor name into <type><num>_<property>.
@@ -102,7 +142,7 @@ func explodeSensorFilename(filename string) (ok bool, sensorType string, sensorN
 }
 
 func collectSensorData(dir string, data map[string]map[string]string) error {
-	sensorFiles, dirError := ioutil.ReadDir(dir)
+	sensorFiles, dirError := os.ReadDir(dir)
 	if dirError != nil {
 		return dirError
 	}
@@ -115,7 +155,7 @@ func collectSensorData(dir string, data map[string]map[string]string) error {
 
 		for _, t := range hwmonSensorTypes {
 			if t == sensorType {
-				addValueFile(data, sensorType+strconv.Itoa(sensorNum), sensorProperty, path.Join(dir, file.Name()))
+				addValueFile(data, sensorType+strconv.Itoa(sensorNum), sensorProperty, filepath.Join(dir, file.Name()))
 				break
 			}
 		}
@@ -129,13 +169,18 @@ func (c *hwMonCollector) updateHwmon(ch chan<- prometheus.Metric, dir string) er
 		return err
 	}
 
+	if c.deviceFilter.ignored(hwmonName) {
+		level.Debug(c.logger).Log("msg", "ignoring hwmon chip", "chip", hwmonName)
+		return nil
+	}
+
 	data := make(map[string]map[string]string)
 	err = collectSensorData(dir, data)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(path.Join(dir, "device")); err == nil {
-		err := collectSensorData(path.Join(dir, "device"), data)
+	if _, err := os.Stat(filepath.Join(dir, "device")); err == nil {
+		err := collectSensorData(filepath.Join(dir, "device"), data)
 		if err != nil {
 			return err
 		}
@@ -167,12 +212,10 @@ func (c *hwMonCollector) updateHwmon(ch chan<- prometheus.Metric, dir string) er
 
 		labels := []string{hwmonName, sensor}
 		if labelText, ok := sensorData["label"]; ok {
-			label := cleanMetricName(labelText)
-			if label != "" {
-				desc := prometheus.NewDesc("node_hwmon_sensor_label", "Label for given chip and sensor",
-					[]string{"chip", "sensor", "label"}, nil)
-				ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, 1.0, hwmonName, sensor, label)
-			}
+			label := strings.ToValidUTF8(labelText, "�")
+			desc := prometheus.NewDesc("node_hwmon_sensor_label", "Label for given chip and sensor",
+				[]string{"chip", "sensor", "label"}, nil)
+			ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, 1.0, hwmonName, sensor, label)
 		}
 
 		if sensorType == "beep_enable" {
@@ -251,6 +294,9 @@ func (c *hwMonCollector) updateHwmon(ch chan<- prometheus.Metric, dir string) er
 				continue
 			}
 			if sensorType == "temp" && element != "type" {
+				if element == "" {
+					element = "input"
+				}
 				desc := prometheus.NewDesc(name+"_celsius", "Hardware monitor for temperature ("+element+")", hwmonLabelDesc, nil)
 				ch <- prometheus.MustNewConstMetric(
 					desc, prometheus.GaugeValue, parsedValue*0.001, labels...)
@@ -320,17 +366,17 @@ func (c *hwMonCollector) hwmonName(dir string) (string, error) {
 	// However the path of the device has to be stable:
 	// - /sys/devices/<bus>/<device>
 	// Some hardware monitors have a "name" file that exports a human
-	// readbale name that can be used.
+	// readable name that can be used.
 
 	// human readable names would be bat0 or coretemp, while a path string
 	// could be platform_applesmc.768
 
 	// preference 1: construct a name based on device name, always unique
 
-	devicePath, devErr := filepath.EvalSymlinks(path.Join(dir, "device"))
+	devicePath, devErr := filepath.EvalSymlinks(filepath.Join(dir, "device"))
 	if devErr == nil {
-		devPathPrefix, devName := path.Split(devicePath)
-		_, devType := path.Split(strings.TrimRight(devPathPrefix, "/"))
+		devPathPrefix, devName := filepath.Split(devicePath)
+		_, devType := filepath.Split(strings.TrimRight(devPathPrefix, "/"))
 
 		cleanDevName := cleanMetricName(devName)
 		cleanDevType := cleanMetricName(devType)
@@ -345,7 +391,7 @@ func (c *hwMonCollector) hwmonName(dir string) (string, error) {
 	}
 
 	// preference 2: is there a name file
-	sysnameRaw, nameErr := ioutil.ReadFile(path.Join(dir, "name"))
+	sysnameRaw, nameErr := os.ReadFile(filepath.Join(dir, "name"))
 	if nameErr == nil && string(sysnameRaw) != "" {
 		cleanName := cleanMetricName(string(sysnameRaw))
 		if cleanName != "" {
@@ -362,7 +408,7 @@ func (c *hwMonCollector) hwmonName(dir string) (string, error) {
 	}
 
 	// take the last path element, this will be hwmonX
-	_, name := path.Split(realDir)
+	_, name := filepath.Split(realDir)
 	cleanName := cleanMetricName(name)
 	if cleanName != "" {
 		return cleanName, nil
@@ -373,7 +419,7 @@ func (c *hwMonCollector) hwmonName(dir string) (string, error) {
 // hwmonHumanReadableChipName is similar to the methods in hwmonName, but with
 // different precedences -- we can allow duplicates here.
 func (c *hwMonCollector) hwmonHumanReadableChipName(dir string) (string, error) {
-	sysnameRaw, nameErr := ioutil.ReadFile(path.Join(dir, "name"))
+	sysnameRaw, nameErr := os.ReadFile(filepath.Join(dir, "name"))
 	if nameErr != nil {
 		return "", nameErr
 	}
@@ -392,29 +438,30 @@ func (c *hwMonCollector) Update(ch chan<- prometheus.Metric) error {
 	// Step 1: scan /sys/class/hwmon, resolve all symlinks and call
 	//         updatesHwmon for each folder
 
-	hwmonPathName := path.Join(sysFilePath("class"), "hwmon")
+	hwmonPathName := filepath.Join(sysFilePath("class"), "hwmon")
 
-	hwmonFiles, err := ioutil.ReadDir(hwmonPathName)
+	hwmonFiles, err := os.ReadDir(hwmonPathName)
 	if err != nil {
-		if os.IsNotExist(err) {
-			log.Debug("hwmon collector metrics are not available for this system")
-			return nil
+		if errors.Is(err, os.ErrNotExist) {
+			level.Debug(c.logger).Log("msg", "hwmon collector metrics are not available for this system")
+			return ErrNoData
 		}
 
 		return err
 	}
 
 	for _, hwDir := range hwmonFiles {
-		hwmonXPathName := path.Join(hwmonPathName, hwDir.Name())
+		hwmonXPathName := filepath.Join(hwmonPathName, hwDir.Name())
+		fileInfo, _ := os.Lstat(hwmonXPathName)
 
-		if hwDir.Mode()&os.ModeSymlink > 0 {
-			hwDir, err = os.Stat(hwmonXPathName)
+		if fileInfo.Mode()&os.ModeSymlink > 0 {
+			fileInfo, err = os.Stat(hwmonXPathName)
 			if err != nil {
 				continue
 			}
 		}
 
-		if !hwDir.IsDir() {
+		if !fileInfo.IsDir() {
 			continue
 		}
 

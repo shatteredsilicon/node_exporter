@@ -11,6 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !nodevstat
 // +build !nodevstat
 
 package collector
@@ -19,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/go-kit/log"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -96,31 +98,32 @@ type devstatCollector struct {
 	bytesDesc     *prometheus.Desc
 	transfersDesc *prometheus.Desc
 	blocksDesc    *prometheus.Desc
+	logger        log.Logger
 }
 
 func init() {
-	Factories["devstat"] = NewDevstatCollector
+	registerCollector("devstat", defaultDisabled, NewDevstatCollector)
 }
 
-// Takes a prometheus registry and returns a new Collector exposing
-// Device stats.
-func NewDevstatCollector() (Collector, error) {
+// NewDevstatCollector returns a new Collector exposing Device stats.
+func NewDevstatCollector(logger log.Logger) (Collector, error) {
 	return &devstatCollector{
 		bytesDesc: prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, devstatSubsystem, "bytes_total"),
+			prometheus.BuildFQName(namespace, devstatSubsystem, "bytes_total"),
 			"The total number of bytes transferred for reads and writes on the device.",
 			[]string{"device"}, nil,
 		),
 		transfersDesc: prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, devstatSubsystem, "transfers_total"),
+			prometheus.BuildFQName(namespace, devstatSubsystem, "transfers_total"),
 			"The total number of transactions completed.",
 			[]string{"device"}, nil,
 		),
 		blocksDesc: prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, devstatSubsystem, "blocks_total"),
+			prometheus.BuildFQName(namespace, devstatSubsystem, "blocks_total"),
 			"The total number of bytes given in terms of the devices blocksize.",
 			[]string{"device"}, nil,
 		),
+		logger: logger,
 	}, nil
 }
 
@@ -142,5 +145,5 @@ func (c *devstatCollector) Update(ch chan<- prometheus.Metric) error {
 		ch <- prometheus.MustNewConstMetric(c.blocksDesc, prometheus.CounterValue, float64(stats.blocks), device)
 	}
 
-	return err
+	return nil
 }

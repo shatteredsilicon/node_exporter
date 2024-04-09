@@ -11,6 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !nocpu
 // +build !nocpu
 
 package collector
@@ -21,8 +22,9 @@ import (
 	"strconv"
 	"unsafe"
 
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/common/log"
 	"golang.org/x/sys/unix"
 )
 
@@ -81,28 +83,25 @@ func getCPUTimes() ([]cputime, error) {
 }
 
 type statCollector struct {
-	cpu  typedDesc
-	temp typedDesc
+	cpu    typedDesc
+	temp   typedDesc
+	logger log.Logger
 }
 
 func init() {
-	Factories["cpu"] = NewStatCollector
+	registerCollector("cpu", defaultEnabled, NewStatCollector)
 }
 
-// Takes a prometheus registry and returns a new Collector exposing
-// CPU stats.
-func NewStatCollector() (Collector, error) {
+// NewStatCollector returns a new Collector exposing CPU stats.
+func NewStatCollector(logger log.Logger) (Collector, error) {
 	return &statCollector{
-		cpu: typedDesc{prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, "cpu", "seconds_total"),
-			"Seconds the CPU spent in each mode.",
-			[]string{"cpu", "mode"}, nil,
-		), prometheus.CounterValue},
+		cpu: typedDesc{nodeCPUSecondsDesc, prometheus.CounterValue},
 		temp: typedDesc{prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, "cpu", "temperature_celsius"),
+			prometheus.BuildFQName(namespace, cpuCollectorSubsystem, "temperature_celsius"),
 			"CPU temperature",
 			[]string{"cpu"}, nil,
 		), prometheus.GaugeValue},
+		logger: logger,
 	}, nil
 }
 
@@ -135,15 +134,31 @@ func (c *statCollector) Update(ch chan<- prometheus.Metric) error {
 		if err != nil {
 			if err == unix.ENOENT {
 				// No temperature information for this CPU
-				log.Debugf("no temperature information for CPU %d", cpu)
+				level.Debug(c.logger).Log("msg", "no temperature information for CPU", "cpu", cpu)
 			} else {
 				// Unexpected error
 				ch <- c.temp.mustNewConstMetric(math.NaN(), lcpu)
-				log.Errorf("failed to query CPU temperature for CPU %d: %s", cpu, err)
+				level.Error(c.logger).Log("msg", "failed to query CPU temperature for CPU", "cpu", cpu, "err", err)
 			}
 			continue
 		}
-		ch <- c.temp.mustNewConstMetric(float64(temp-2732)/10, lcpu)
+
+		// Temp is a signed integer in deci-degrees Kelvin.
+		// Cast uint32 to int32 and convert to float64 degrees Celsius.
+		//
+		// 2732 is used as the conversion constant for deci-degrees
+		// Kelvin, in multiple places in the kernel that feed into this
+		// sysctl, so we want to maintain consistency:
+		//
+		// sys/dev/amdtemp/amdtemp.c
+		//   #define AMDTEMP_ZERO_C_TO_K 2732
+		//
+		// sys/dev/acpica/acpi_thermal.c
+		//   #define TZ_ZEROC            2732
+		//
+		// sys/dev/coretemp/coretemp.c
+		//   #define TZ_ZEROC            2732
+		ch <- c.temp.mustNewConstMetric(float64(int32(temp)-2732)/10, lcpu)
 	}
 	return err
 }

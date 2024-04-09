@@ -14,14 +14,14 @@
 package collector
 
 import (
-	"flag"
 	"testing"
 
+	"github.com/alecthomas/kingpin/v2"
 	"github.com/prometheus/procfs"
 )
 
 func TestDefaultProcPath(t *testing.T) {
-	if err := flag.Set("collector.procfs", procfs.DefaultMountPoint); err != nil {
+	if _, err := kingpin.CommandLine.Parse([]string{"--path.procfs", procfs.DefaultMountPoint}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -35,7 +35,7 @@ func TestDefaultProcPath(t *testing.T) {
 }
 
 func TestCustomProcPath(t *testing.T) {
-	if err := flag.Set("collector.procfs", "./../some/./place/"); err != nil {
+	if _, err := kingpin.CommandLine.Parse([]string{"--path.procfs", "./../some/./place/"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -49,7 +49,7 @@ func TestCustomProcPath(t *testing.T) {
 }
 
 func TestDefaultSysPath(t *testing.T) {
-	if err := flag.Set("collector.sysfs", "/sys"); err != nil {
+	if _, err := kingpin.CommandLine.Parse([]string{"--path.sysfs", "/sys"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -63,7 +63,7 @@ func TestDefaultSysPath(t *testing.T) {
 }
 
 func TestCustomSysPath(t *testing.T) {
-	if err := flag.Set("collector.sysfs", "./../some/./place/"); err != nil {
+	if _, err := kingpin.CommandLine.Parse([]string{"--path.sysfs", "./../some/./place/"}); err != nil {
 		t.Fatal(err)
 	}
 

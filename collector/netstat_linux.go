@@ -11,18 +11,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !nonetstat
 // +build !nonetstat
 
 package collector
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/alecthomas/kingpin/v2"
+	"github.com/go-kit/log"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -30,30 +35,53 @@ const (
 	netStatsSubsystem = "netstat"
 )
 
-type netStatCollector struct{}
+var (
+	netStatFields = kingpin.Flag("collector.netstat.fields", "Regexp of fields to return for netstat collector.").Default("^(.*_(InErrors|InErrs)|Ip_Forwarding|Ip(6|Ext)_(InOctets|OutOctets)|Icmp6?_(InMsgs|OutMsgs)|TcpExt_(Listen.*|Syncookies.*|TCPSynRetrans|TCPTimeouts)|Tcp_(ActiveOpens|InSegs|OutSegs|OutRsts|PassiveOpens|RetransSegs|CurrEstab)|Udp6?_(InDatagrams|OutDatagrams|NoPorts|RcvbufErrors|SndbufErrors))$").String()
+)
+
+type NetStatConfig struct {
+	Enabled bool   `ini:"netstat"`
+	Fields  string `ini:"netstat.fields"`
+}
+
+type netStatCollector struct {
+	fieldPattern *regexp.Regexp
+	logger       log.Logger
+}
 
 func init() {
-	Factories["netstat"] = NewNetStatCollector
+	registerCollector("netstat", defaultEnabled, NewNetStatCollector)
 }
 
 // NewNetStatCollector takes and returns
 // a new Collector exposing network stats.
-func NewNetStatCollector() (Collector, error) {
-	return &netStatCollector{}, nil
+func NewNetStatCollector(logger log.Logger) (Collector, error) {
+	pattern := regexp.MustCompile(*netStatFields)
+	return &netStatCollector{
+		fieldPattern: pattern,
+		logger:       logger,
+	}, nil
 }
 
 func (c *netStatCollector) Update(ch chan<- prometheus.Metric) error {
 	netStats, err := getNetStats(procFilePath("net/netstat"))
 	if err != nil {
-		return fmt.Errorf("couldn't get netstats: %s", err)
+		return fmt.Errorf("couldn't get netstats: %w", err)
 	}
 	snmpStats, err := getNetStats(procFilePath("net/snmp"))
 	if err != nil {
-		return fmt.Errorf("couldn't get SNMP stats: %s", err)
+		return fmt.Errorf("couldn't get SNMP stats: %w", err)
+	}
+	snmp6Stats, err := getSNMP6Stats(procFilePath("net/snmp6"))
+	if err != nil {
+		return fmt.Errorf("couldn't get SNMP6 stats: %w", err)
 	}
 	// Merge the results of snmpStats into netStats (collisions are possible, but
 	// we know that the keys are always unique for the given use case).
 	for k, v := range snmpStats {
+		netStats[k] = v
+	}
+	for k, v := range snmp6Stats {
 		netStats[k] = v
 	}
 	for protocol, protocolStats := range netStats {
@@ -61,12 +89,15 @@ func (c *netStatCollector) Update(ch chan<- prometheus.Metric) error {
 			key := protocol + "_" + name
 			v, err := strconv.ParseFloat(value, 64)
 			if err != nil {
-				return fmt.Errorf("invalid value %s in netstats: %s", value, err)
+				return fmt.Errorf("invalid value %s in netstats: %w", value, err)
+			}
+			if !c.fieldPattern.MatchString(key) {
+				continue
 			}
 			ch <- prometheus.MustNewConstMetric(
 				prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, netStatsSubsystem, key),
-					fmt.Sprintf("Protocol %s statistic %s.", protocol, name),
+					prometheus.BuildFQName(namespace, netStatsSubsystem, key),
+					fmt.Sprintf("Statistic %s.", protocol+name),
 					nil, nil,
 				),
 				prometheus.UntypedValue, v,
@@ -105,6 +136,47 @@ func parseNetStats(r io.Reader, fileName string) (map[string]map[string]string, 
 		}
 		for i := 1; i < len(nameParts); i++ {
 			netStats[protocol][nameParts[i]] = valueParts[i]
+		}
+	}
+
+	return netStats, scanner.Err()
+}
+
+func getSNMP6Stats(fileName string) (map[string]map[string]string, error) {
+	file, err := os.Open(fileName)
+	if err != nil {
+		// On systems with IPv6 disabled, this file won't exist.
+		// Do nothing.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+	defer file.Close()
+
+	return parseSNMP6Stats(file)
+}
+
+func parseSNMP6Stats(r io.Reader) (map[string]map[string]string, error) {
+	var (
+		netStats = map[string]map[string]string{}
+		scanner  = bufio.NewScanner(r)
+	)
+
+	for scanner.Scan() {
+		stat := strings.Fields(scanner.Text())
+		if len(stat) < 2 {
+			continue
+		}
+		// Expect to have "6" in metric name, skip line otherwise
+		if sixIndex := strings.Index(stat[0], "6"); sixIndex != -1 {
+			protocol := stat[0][:sixIndex+1]
+			name := stat[0][sixIndex+1:]
+			if _, present := netStats[protocol]; !present {
+				netStats[protocol] = map[string]string{}
+			}
+			netStats[protocol][name] = stat[1]
 		}
 	}
 

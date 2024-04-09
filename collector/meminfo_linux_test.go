@@ -11,6 +11,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !nomeminfo
+// +build !nomeminfo
+
 package collector
 
 import (
@@ -30,11 +33,11 @@ func TestMemInfo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if want, got := 3831959552.0, memInfo["MemTotal"]; want != got {
+	if want, got := 3831959552.0, memInfo["MemTotal_bytes"]; want != got {
 		t.Errorf("want memory total %f, got %f", want, got)
 	}
 
-	if want, got := 3787456512.0, memInfo["DirectMap2M"]; want != got {
+	if want, got := 3787456512.0, memInfo["DirectMap2M_bytes"]; want != got {
 		t.Errorf("want memory directMap2M %f, got %f", want, got)
 	}
 }

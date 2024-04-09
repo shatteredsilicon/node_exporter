@@ -11,264 +11,401 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !nodiskstats
 // +build !nodiskstats
 
 package collector
 
 import (
 	"bufio"
-	"flag"
 	"fmt"
-	"io"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/common/log"
+	"github.com/prometheus/procfs/blockdevice"
 )
 
 const (
-	diskSubsystem         = "disk"
-	diskSectorSize uint64 = 512
+	secondsPerTick = 1.0 / 1000.0
+
+	// Read sectors and write sectors are the "standard UNIX 512-byte sectors, not any device- or filesystem-specific block size."
+	// See also https://www.kernel.org/doc/Documentation/block/stat.txt
+	unixSectorSize = 512.0
+
+	diskstatsDefaultIgnoredDevices = "^(ram|loop|fd|(h|s|v|xv)d[a-z]|nvme\\d+n\\d+p)\\d+$"
+
+	// See udevadm(8).
+	udevDevicePropertyPrefix = "E:"
+
+	// Udev device properties.
+	udevDMLVLayer               = "DM_LV_LAYER"
+	udevDMLVName                = "DM_LV_NAME"
+	udevDMName                  = "DM_NAME"
+	udevDMUUID                  = "DM_UUID"
+	udevDMVGName                = "DM_VG_NAME"
+	udevIDATA                   = "ID_ATA"
+	udevIDATARotationRateRPM    = "ID_ATA_ROTATION_RATE_RPM"
+	udevIDATASATA               = "ID_ATA_SATA"
+	udevIDATASATASignalRateGen1 = "ID_ATA_SATA_SIGNAL_RATE_GEN1"
+	udevIDATASATASignalRateGen2 = "ID_ATA_SATA_SIGNAL_RATE_GEN2"
+	udevIDATAWriteCache         = "ID_ATA_WRITE_CACHE"
+	udevIDATAWriteCacheEnabled  = "ID_ATA_WRITE_CACHE_ENABLED"
+	udevIDFSType                = "ID_FS_TYPE"
+	udevIDFSUsage               = "ID_FS_USAGE"
+	udevIDFSUUID                = "ID_FS_UUID"
+	udevIDFSVersion             = "ID_FS_VERSION"
+	udevIDModel                 = "ID_MODEL"
+	udevIDPath                  = "ID_PATH"
+	udevIDRevision              = "ID_REVISION"
+	udevIDSerialShort           = "ID_SERIAL_SHORT"
+	udevIDWWN                   = "ID_WWN"
+	udevSCSIIdentSerial         = "SCSI_IDENT_SERIAL"
 )
 
-var (
-	ignoredDevices = flag.String("collector.diskstats.ignored-devices", "^(ram|loop|fd|(h|s|v|xv)d[a-z]|nvme\\d+n\\d+p)\\d+$", "Regexp of devices to ignore for diskstats.")
-)
+type typedFactorDesc struct {
+	desc      *prometheus.Desc
+	valueType prometheus.ValueType
+}
+
+type udevInfo map[string]string
+
+func (d *typedFactorDesc) mustNewConstMetric(value float64, labels ...string) prometheus.Metric {
+	return prometheus.MustNewConstMetric(d.desc, d.valueType, value, labels...)
+}
 
 type diskstatsCollector struct {
-	ignoredDevicesPattern *regexp.Regexp
-	descs                 []typedDesc
+	deviceFilter            deviceFilter
+	fs                      blockdevice.FS
+	infoDesc                typedFactorDesc
+	descs                   []typedFactorDesc
+	filesystemInfoDesc      typedFactorDesc
+	deviceMapperInfoDesc    typedFactorDesc
+	ataDescs                map[string]typedFactorDesc
+	logger                  log.Logger
+	getUdevDeviceProperties func(uint32, uint32) (udevInfo, error)
 }
 
 func init() {
-	Factories["diskstats"] = NewDiskstatsCollector
+	registerCollector("diskstats", defaultEnabled, NewDiskstatsCollector)
 }
 
 // NewDiskstatsCollector returns a new Collector exposing disk device stats.
-func NewDiskstatsCollector() (Collector, error) {
+// Docs from https://www.kernel.org/doc/Documentation/iostats.txt
+func NewDiskstatsCollector(logger log.Logger) (Collector, error) {
 	var diskLabelNames = []string{"device"}
+	fs, err := blockdevice.NewFS(*procPath, *sysPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open sysfs: %w", err)
+	}
 
-	return &diskstatsCollector{
-		ignoredDevicesPattern: regexp.MustCompile(*ignoredDevices),
-		// Docs from https://www.kernel.org/doc/Documentation/iostats.txt
-		descs: []typedDesc{
+	deviceFilter, err := newDiskstatsDeviceFilter(logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse device filter flags: %w", err)
+	}
+
+	collector := diskstatsCollector{
+		deviceFilter: deviceFilter,
+		fs:           fs,
+		infoDesc: typedFactorDesc{
+			desc: prometheus.NewDesc(prometheus.BuildFQName(namespace, diskSubsystem, "info"),
+				"Info of /sys/block/<block_device>.",
+				[]string{"device", "major", "minor", "path", "wwn", "model", "serial", "revision"},
+				nil,
+			), valueType: prometheus.GaugeValue,
+		},
+		descs: []typedFactorDesc{
+			{
+				desc: readsCompletedDesc, valueType: prometheus.CounterValue,
+			},
 			{
 				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "reads_completed"),
-					"The total number of reads completed successfully.",
+					prometheus.BuildFQName(namespace, diskSubsystem, "reads_merged_total"),
+					"The total number of reads merged.",
 					diskLabelNames,
 					nil,
 				), valueType: prometheus.CounterValue,
 			},
 			{
+				desc: readBytesDesc, valueType: prometheus.CounterValue,
+			},
+			{
+				desc: readTimeSecondsDesc, valueType: prometheus.CounterValue,
+			},
+			{
+				desc: writesCompletedDesc, valueType: prometheus.CounterValue,
+			},
+			{
 				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "reads_merged"),
-					"The total number of reads merged. See https://www.kernel.org/doc/Documentation/iostats.txt.",
+					prometheus.BuildFQName(namespace, diskSubsystem, "writes_merged_total"),
+					"The number of writes merged.",
 					diskLabelNames,
 					nil,
 				), valueType: prometheus.CounterValue,
 			},
 			{
-				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "sectors_read"),
-					"The total number of sectors read successfully.",
-					diskLabelNames,
-					nil,
-				), valueType: prometheus.CounterValue,
+				desc: writtenBytesDesc, valueType: prometheus.CounterValue,
+			},
+			{
+				desc: writeTimeSecondsDesc, valueType: prometheus.CounterValue,
 			},
 			{
 				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "read_time_ms"),
-					"The total number of milliseconds spent by all reads.",
-					diskLabelNames,
-					nil,
-				), valueType: prometheus.CounterValue,
-			},
-			{
-				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "writes_completed"),
-					"The total number of writes completed successfully.",
-					diskLabelNames,
-					nil,
-				), valueType: prometheus.CounterValue,
-			},
-			{
-				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "writes_merged"),
-					"The number of writes merged. See https://www.kernel.org/doc/Documentation/iostats.txt.",
-					diskLabelNames,
-					nil,
-				), valueType: prometheus.CounterValue,
-			},
-			{
-				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "sectors_written"),
-					"The total number of sectors written successfully.",
-					diskLabelNames,
-					nil,
-				), valueType: prometheus.CounterValue,
-			},
-			{
-				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "write_time_ms"),
-					"This is the total number of milliseconds spent by all writes.",
-					diskLabelNames,
-					nil,
-				), valueType: prometheus.CounterValue,
-			},
-			{
-				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "io_now"),
+					prometheus.BuildFQName(namespace, diskSubsystem, "io_now"),
 					"The number of I/Os currently in progress.",
 					diskLabelNames,
 					nil,
 				), valueType: prometheus.GaugeValue,
 			},
 			{
+				desc: ioTimeSecondsDesc, valueType: prometheus.CounterValue,
+			},
+			{
 				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "io_time_ms"),
-					"Total Milliseconds spent doing I/Os.",
+					prometheus.BuildFQName(namespace, diskSubsystem, "io_time_weighted_seconds_total"),
+					"The weighted # of seconds spent doing I/Os.",
 					diskLabelNames,
 					nil,
 				), valueType: prometheus.CounterValue,
 			},
 			{
 				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "io_time_weighted"),
-					"The weighted # of milliseconds spent doing I/Os. See https://www.kernel.org/doc/Documentation/iostats.txt.",
+					prometheus.BuildFQName(namespace, diskSubsystem, "discards_completed_total"),
+					"The total number of discards completed successfully.",
 					diskLabelNames,
 					nil,
 				), valueType: prometheus.CounterValue,
 			},
 			{
 				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "bytes_read"),
-					"The total number of bytes read successfully.",
+					prometheus.BuildFQName(namespace, diskSubsystem, "discards_merged_total"),
+					"The total number of discards merged.",
 					diskLabelNames,
 					nil,
 				), valueType: prometheus.CounterValue,
 			},
 			{
 				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "bytes_written"),
-					"The total number of bytes written successfully.",
+					prometheus.BuildFQName(namespace, diskSubsystem, "discarded_sectors_total"),
+					"The total number of sectors discarded successfully.",
 					diskLabelNames,
 					nil,
 				), valueType: prometheus.CounterValue,
 			},
 			{
 				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "discards_completed_total"),
-					"The total number of discards completed successfully. See https://www.kernel.org/doc/Documentation/iostats.txt.",
+					prometheus.BuildFQName(namespace, diskSubsystem, "discard_time_seconds_total"),
+					"This is the total number of seconds spent by all discards.",
 					diskLabelNames,
 					nil,
 				), valueType: prometheus.CounterValue,
 			},
 			{
 				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "discards_merged_total"),
-					"The total number of discards merged. See https://www.kernel.org/doc/Documentation/iostats.txt.",
+					prometheus.BuildFQName(namespace, diskSubsystem, "flush_requests_total"),
+					"The total number of flush requests completed successfully",
 					diskLabelNames,
 					nil,
 				), valueType: prometheus.CounterValue,
 			},
 			{
 				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "discarded_sectors_total"),
-					"The total number of sectors discard successfully. See https://www.kernel.org/doc/Documentation/iostats.txt.",
-					diskLabelNames,
-					nil,
-				), valueType: prometheus.CounterValue,
-			},
-			{
-				desc: prometheus.NewDesc(
-					prometheus.BuildFQName(Namespace, diskSubsystem, "discard_time_seconds_total"),
-					"This is the total number of seconds spent by all discards. See https://www.kernel.org/doc/Documentation/iostats.txt.",
+					prometheus.BuildFQName(namespace, diskSubsystem, "flush_requests_time_seconds_total"),
+					"This is the total number of seconds spent by all flush requests.",
 					diskLabelNames,
 					nil,
 				), valueType: prometheus.CounterValue,
 			},
 		},
-	}, nil
+		filesystemInfoDesc: typedFactorDesc{
+			desc: prometheus.NewDesc(prometheus.BuildFQName(namespace, diskSubsystem, "filesystem_info"),
+				"Info about disk filesystem.",
+				[]string{"device", "type", "usage", "uuid", "version"},
+				nil,
+			), valueType: prometheus.GaugeValue,
+		},
+		deviceMapperInfoDesc: typedFactorDesc{
+			desc: prometheus.NewDesc(prometheus.BuildFQName(namespace, diskSubsystem, "device_mapper_info"),
+				"Info about disk device mapper.",
+				[]string{"device", "name", "uuid", "vg_name", "lv_name", "lv_layer"},
+				nil,
+			), valueType: prometheus.GaugeValue,
+		},
+		ataDescs: map[string]typedFactorDesc{
+			udevIDATAWriteCache: {
+				desc: prometheus.NewDesc(prometheus.BuildFQName(namespace, diskSubsystem, "ata_write_cache"),
+					"ATA disk has a write cache.",
+					[]string{"device"},
+					nil,
+				), valueType: prometheus.GaugeValue,
+			},
+			udevIDATAWriteCacheEnabled: {
+				desc: prometheus.NewDesc(prometheus.BuildFQName(namespace, diskSubsystem, "ata_write_cache_enabled"),
+					"ATA disk has its write cache enabled.",
+					[]string{"device"},
+					nil,
+				), valueType: prometheus.GaugeValue,
+			},
+			udevIDATARotationRateRPM: {
+				desc: prometheus.NewDesc(prometheus.BuildFQName(namespace, diskSubsystem, "ata_rotation_rate_rpm"),
+					"ATA disk rotation rate in RPMs (0 for SSDs).",
+					[]string{"device"},
+					nil,
+				), valueType: prometheus.GaugeValue,
+			},
+		},
+		logger: logger,
+	}
+
+	// Only enable getting device properties from udev if the directory is readable.
+	if stat, err := os.Stat(*udevDataPath); err != nil || !stat.IsDir() {
+		level.Error(logger).Log("msg", "Failed to open directory, disabling udev device properties", "path", *udevDataPath)
+	} else {
+		collector.getUdevDeviceProperties = getUdevDeviceProperties
+	}
+
+	return &collector, nil
 }
 
 func (c *diskstatsCollector) Update(ch chan<- prometheus.Metric) error {
-	diskStats, err := getDiskStats()
+	diskStats, err := c.fs.ProcDiskstats()
 	if err != nil {
-		return fmt.Errorf("couldn't get diskstats: %s", err)
+		return fmt.Errorf("couldn't get diskstats: %w", err)
 	}
 
-	for dev, stats := range diskStats {
-		if c.ignoredDevicesPattern.MatchString(dev) {
-			log.Debugf("Ignoring device: %s", dev)
+	for _, stats := range diskStats {
+		dev := stats.DeviceName
+		if c.deviceFilter.ignored(dev) {
 			continue
 		}
 
-		if len(stats) > len(c.descs) {
+		if stats.IoStatsCount < len(c.descs) {
 			return fmt.Errorf("invalid line for %s for %s", procFilePath("diskstats"), dev)
 		}
 
-		for i, value := range stats {
-			v, err := strconv.ParseFloat(value, 64)
-			if err != nil {
-				return fmt.Errorf("invalid value %s in diskstats: %s", value, err)
+		info, err := getUdevDeviceProperties(stats.MajorNumber, stats.MinorNumber)
+		if err != nil {
+			level.Debug(c.logger).Log("msg", "Failed to parse udev info", "err", err)
+		}
+
+		// This is usually the serial printed on the disk label.
+		serial := info[udevSCSIIdentSerial]
+
+		// If it's undefined, fallback to ID_SERIAL_SHORT instead.
+		if serial == "" {
+			serial = info[udevIDSerialShort]
+		}
+
+		ch <- c.infoDesc.mustNewConstMetric(1.0, dev,
+			fmt.Sprint(stats.MajorNumber),
+			fmt.Sprint(stats.MinorNumber),
+			info[udevIDPath],
+			info[udevIDWWN],
+			info[udevIDModel],
+			serial,
+			info[udevIDRevision],
+		)
+
+		statCount := stats.IoStatsCount - 3 // Total diskstats record count, less MajorNumber, MinorNumber and DeviceName
+
+		for i, val := range []float64{
+			float64(stats.ReadIOs),
+			float64(stats.ReadMerges),
+			float64(stats.ReadSectors) * unixSectorSize,
+			float64(stats.ReadTicks) * secondsPerTick,
+			float64(stats.WriteIOs),
+			float64(stats.WriteMerges),
+			float64(stats.WriteSectors) * unixSectorSize,
+			float64(stats.WriteTicks) * secondsPerTick,
+			float64(stats.IOsInProgress),
+			float64(stats.IOsTotalTicks) * secondsPerTick,
+			float64(stats.WeightedIOTicks) * secondsPerTick,
+			float64(stats.DiscardIOs),
+			float64(stats.DiscardMerges),
+			float64(stats.DiscardSectors),
+			float64(stats.DiscardTicks) * secondsPerTick,
+			float64(stats.FlushRequestsCompleted),
+			float64(stats.TimeSpentFlushing) * secondsPerTick,
+		} {
+			if i >= statCount {
+				break
 			}
-			ch <- c.descs[i].mustNewConstMetric(v, dev)
+			ch <- c.descs[i].mustNewConstMetric(val, dev)
+		}
+
+		if fsType := info[udevIDFSType]; fsType != "" {
+			ch <- c.filesystemInfoDesc.mustNewConstMetric(1.0, dev,
+				fsType,
+				info[udevIDFSUsage],
+				info[udevIDFSUUID],
+				info[udevIDFSVersion],
+			)
+		}
+
+		if name := info[udevDMName]; name != "" {
+			ch <- c.deviceMapperInfoDesc.mustNewConstMetric(1.0, dev,
+				name,
+				info[udevDMUUID],
+				info[udevDMVGName],
+				info[udevDMLVName],
+				info[udevDMLVLayer],
+			)
+		}
+
+		if ata := info[udevIDATA]; ata != "" {
+			for attr, desc := range c.ataDescs {
+				str, ok := info[attr]
+				if !ok {
+					level.Debug(c.logger).Log("msg", "Udev attribute does not exist", "attribute", attr)
+					continue
+				}
+
+				if value, err := strconv.ParseFloat(str, 64); err == nil {
+					ch <- desc.mustNewConstMetric(value, dev)
+				} else {
+					level.Error(c.logger).Log("msg", "Failed to parse ATA value", "err", err)
+				}
+			}
 		}
 	}
 	return nil
 }
 
-func getDiskStats() (map[string]map[int]string, error) {
-	file, err := os.Open(procFilePath("diskstats"))
+func getUdevDeviceProperties(major, minor uint32) (udevInfo, error) {
+	filename := udevDataFilePath(fmt.Sprintf("b%d:%d", major, minor))
+
+	data, err := os.Open(filename)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer data.Close()
 
-	return parseDiskStats(file)
-}
+	info := make(udevInfo)
 
-func convertDiskSectorsToBytes(sectorCount string) (string, error) {
-	sectors, err := strconv.ParseUint(sectorCount, 10, 64)
-	if err != nil {
-		return "", err
-	}
-
-	return strconv.FormatUint(sectors*diskSectorSize, 10), nil
-}
-
-func parseDiskStats(r io.Reader) (map[string]map[int]string, error) {
-	var (
-		diskStats = map[string]map[int]string{}
-		scanner   = bufio.NewScanner(r)
-	)
-
+	scanner := bufio.NewScanner(data)
 	for scanner.Scan() {
-		parts := strings.Fields(scanner.Text())
-		if len(parts) < 4 { // we strip major, minor and dev
-			return nil, fmt.Errorf("invalid line in %s: %s", procFilePath("diskstats"), scanner.Text())
-		}
-		dev := parts[2]
-		diskStats[dev] = map[int]string{}
-		for i, v := range parts[3:] {
-			diskStats[dev][i] = v
-		}
-		bytesRead, err := convertDiskSectorsToBytes(diskStats[dev][2])
-		if err != nil {
-			return nil, fmt.Errorf("invalid value for sectors read in %s: %s", procFilePath("diskstats"), scanner.Text())
-		}
-		diskStats[dev][11] = bytesRead
+		line := scanner.Text()
 
-		bytesWritten, err := convertDiskSectorsToBytes(diskStats[dev][6])
-		if err != nil {
-			return nil, fmt.Errorf("invalid value for sectors written in %s: %s", procFilePath("diskstats"), scanner.Text())
+		// We're only interested in device properties.
+		if !strings.HasPrefix(line, udevDevicePropertyPrefix) {
+			continue
 		}
-		diskStats[dev][12] = bytesWritten
+
+		line = strings.TrimPrefix(line, udevDevicePropertyPrefix)
+
+		/* TODO: After we drop support for Go 1.17, the condition below can be simplified to:
+
+		if name, value, found := strings.Cut(line, "="); found {
+			info[name] = value
+		}
+		*/
+		if fields := strings.SplitN(line, "=", 2); len(fields) == 2 {
+			info[fields[0]] = fields[1]
+		}
 	}
 
-	return diskStats, scanner.Err()
+	return info, nil
 }

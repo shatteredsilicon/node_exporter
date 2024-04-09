@@ -11,28 +11,38 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build (linux || openbsd) && !nointerrupts
 // +build linux openbsd
 // +build !nointerrupts
 
 package collector
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"github.com/go-kit/log"
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 type interruptsCollector struct {
-	desc typedDesc
+	desc   typedDesc
+	logger log.Logger
 }
 
 func init() {
-	Factories["interrupts"] = NewInterruptsCollector
+	registerCollector("interrupts", defaultDisabled, NewInterruptsCollector)
+}
+
+type InterruptsConfig struct {
+	Enabled bool `ini:"interrupts"`
 }
 
 // NewInterruptsCollector returns a new Collector exposing interrupts stats.
-func NewInterruptsCollector() (Collector, error) {
+func NewInterruptsCollector(logger log.Logger) (Collector, error) {
 	return &interruptsCollector{
 		desc: typedDesc{prometheus.NewDesc(
-			Namespace+"_interrupts",
+			namespace+"_interrupts_total",
 			"Interrupt details.",
 			interruptLabelNames, nil,
 		), prometheus.CounterValue},
+		logger: logger,
 	}, nil
 }
