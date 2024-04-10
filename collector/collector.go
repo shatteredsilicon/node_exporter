@@ -244,3 +244,19 @@ func pushMetric(ch chan<- prometheus.Metric, fieldDesc *prometheus.Desc, name st
 
 	ch <- prometheus.MustNewConstMetric(fieldDesc, valueType, fVal, labelValues...)
 }
+
+// Collectors returns a name list of registered/available collectors
+func Collectors() []string {
+	collectors := make([]string, 0)
+	for k := range collectorState {
+		collectors = append(collectors, k)
+	}
+	return collectors
+}
+
+// SetCollectorState sets state of a registered/available collector
+func SetCollectorState(name string, state bool) {
+	if _, ok := collectorState[name]; ok {
+		collectorState[name] = &state
+	}
+}

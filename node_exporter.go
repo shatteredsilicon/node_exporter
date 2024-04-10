@@ -14,7 +14,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	stdlog "log"
 	"net/http"
@@ -24,12 +23,9 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 
-	"github.com/prometheus/common/promlog"
-	"github.com/prometheus/common/promlog/flag"
-
+	prometheusConfig "github.com/prometheus/common/config"
 	"github.com/prometheus/common/promlog"
 	"github.com/prometheus/common/promlog/flag"
 
@@ -41,9 +37,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/version"
 	"github.com/prometheus/exporter-toolkit/web"
-	"github.com/prometheus/exporter-toolkit/web/kingpinflag"
-	"github.com/prometheus/node_exporter/collector"
+	"github.com/shatteredsilicon/node_exporter/collector"
 	"gopkg.in/ini.v1"
+	"gopkg.in/yaml.v2"
 )
 
 // handler wraps an unfiltered http.Handler but uses a filtered handler,
@@ -58,13 +54,6 @@ type handler struct {
 	maxRequests             int
 	logger                  log.Logger
 }
-
-var cfg = new(config)
-var (
-	configPath        = flag.String("config", "/opt/ss/ssm-client/node_exporter.conf", "Path of config file")
-	enabledCollectors = flag.String("collectors.enabled", filterAvailableCollectors(defaultCollectors), "Comma-separated list of collectors to use.")
-	printCollectors   = flag.Bool("collectors.print", false, "If true, print available collectors and exit.")
-)
 
 func newHandler(includeExporterMetrics bool, maxRequests int, logger log.Logger) *handler {
 	h := &handler{
@@ -169,30 +158,80 @@ func (h *handler) innerHandler(filters ...string) (http.Handler, error) {
 	return handler, nil
 }
 
+var cfg = new(config)
+var setByUserMap = make(map[string]bool)
+
+func flagAction(flagName string) func(ctx *kingpin.ParseContext) error {
+	return func(ctx *kingpin.ParseContext) error {
+		setByUserMap[flagName] = true
+		return nil
+	}
+}
+
+var (
+	disableDefaultCollectors = kingpin.Flag(
+		"collector.disable-defaults",
+		"Set all collectors to disabled by default.",
+	).Action(flagAction("collector.disable-defaults")).Bool()
+	maxProcs = kingpin.Flag(
+		"runtime.gomaxprocs", "The target number of CPUs Go will run on (GOMAXPROCS)",
+	).Envar("GOMAXPROCS").Action(flagAction("runtime.gomaxprocs")).Int()
+	disableExporterMetrics = kingpin.Flag(
+		"web.disable-exporter-metrics",
+		"Exclude metrics about the exporter itself (promhttp_*, process_*, go_*).",
+	).Action(flagAction("web.disable-exporter-metrics")).Bool()
+	maxRequests = kingpin.Flag(
+		"web.max-requests",
+		"Maximum number of parallel scrape requests. Use 0 to disable.",
+	).Action(flagAction("web.max-requests")).Int()
+	metricsPath = kingpin.Flag(
+		"web.telemetry-path",
+		"Path under which to expose metrics.",
+	).Action(flagAction("web.telemetry-path")).String()
+	configPath = kingpin.Flag(
+		"config",
+		"Path of config file",
+	).Action(flagAction("config")).Default("/opt/ss/ssm-client/node_exporter.conf").String()
+	listenAddress = kingpin.Flag(
+		"web.listen-address",
+		"Address on which to expose metrics and web interface.",
+	).Action(flagAction("web.listen-address")).Strings()
+	enabledCollectors = kingpin.Flag(
+		"collectors.enabled",
+		"Comma-separated list of collectors to use.",
+	).Action(flagAction("collectors.enabled")).String()
+	printCollectors = kingpin.Flag(
+		"collectors.print",
+		"If true, print available collectors and exit.",
+	).Action(flagAction("collectors.print")).Bool()
+	sslCertFile = kingpin.Flag(
+		"web.ssl-cert-file",
+		"Path to SSL certificate file.",
+	).Action(flagAction("web.ssl-cert-file")).Default("").String()
+	sslKeyFile = kingpin.Flag(
+		"web.ssl-key-file",
+		"Path to SSL key file.",
+	).Action(flagAction("web.ssl-key-file")).String()
+	webAuthFile = kingpin.Flag(
+		"web.auth-file",
+		"Path to YAML file with server_user, server_password keys for HTTP Basic authentication.",
+	).Action(flagAction("web.auth-file")).String()
+	webConfigFile = kingpin.Flag(
+		"web.config.file",
+		"Path to prometheus web config file (YAML).",
+	).Action(flagAction("web.config.file")).String()
+	systemdSocket = kingpin.Flag(
+		"web.systemd-socket",
+		"Use systemd socket activation listeners instead of port listeners (Linux only).",
+	).Action(flagAction("web.systemd-socket")).Bool()
+)
+
 func main() {
-	flag.Parse()
-	var (
-		metricsPath = kingpin.Flag(
-			"web.telemetry-path",
-			"Path under which to expose metrics.",
-		).Default("/metrics").String()
-		disableExporterMetrics = kingpin.Flag(
-			"web.disable-exporter-metrics",
-			"Exclude metrics about the exporter itself (promhttp_*, process_*, go_*).",
-		).Bool()
-		maxRequests = kingpin.Flag(
-			"web.max-requests",
-			"Maximum number of parallel scrape requests. Use 0 to disable.",
-		).Default("40").Int()
-		disableDefaultCollectors = kingpin.Flag(
-			"collector.disable-defaults",
-			"Set all collectors to disabled by default.",
-		).Default("false").Bool()
-		maxProcs = kingpin.Flag(
-			"runtime.gomaxprocs", "The target number of CPUs Go will run on (GOMAXPROCS)",
-		).Envar("GOMAXPROCS").Default("1").Int()
-		toolkitFlags = kingpinflag.AddFlags(kingpin.CommandLine, ":9100")
-	)
+	kingpin.Parse()
+
+	if err := ini.MapTo(&cfg, *configPath); err != nil {
+		stdlog.Fatalf(fmt.Sprintf("Load config file %s failed: %s\n", *configPath, err.Error()))
+	}
 
 	promlogConfig := &promlog.Config{}
 	flag.AddFlags(kingpin.CommandLine, promlogConfig)
@@ -200,7 +239,6 @@ func main() {
 	kingpin.CommandLine.UsageWriter(os.Stdout)
 	kingpin.HelpFlag.Short('h')
 	kingpin.Parse()
-	logger := promlog.New(promlogConfig)
 
 	if os.Getenv("ON_CONFIGURE") == "1" {
 		err := configure()
@@ -210,24 +248,14 @@ func main() {
 		os.Exit(0)
 	}
 
-	err := ini.MapTo(cfg, *configPath)
-	if err != nil {
-		log.Fatal(fmt.Sprintf("Load config file %s failed: %s", *configPath, err.Error()))
-	}
+	// override flag value with config value
+	// if it's not set
+	overrideFlags()
 
-	log.Infoln("Starting node_exporter", version.Info())
-	log.Infoln("Build context", version.BuildContext())
-
-	// set flags for exporter_shared server
-	flag.Set("web.ssl-cert-file", lookupConfig("web.ssl-cert-file", "").(string))
-	flag.Set("web.ssl-key-file", lookupConfig("web.ssl-key-file", "").(string))
-	flag.Set("web.auth-file", lookupConfig("web.auth-file", "/opt/ss/ssm-client/ssm.yml").(string))
-
-	if lookupConfig("collectors.print", *printCollectors).(bool) {
-		collectorNames := make(sort.StringSlice, 0, len(collector.Factories))
-		for n := range collector.Factories {
-			collectorNames = append(collectorNames, n)
-		}
+	if *printCollectors {
+		names := collector.Collectors()
+		collectorNames := make(sort.StringSlice, 0, len(names))
+		copy(collectorNames, names)
 		collectorNames.Sort()
 		fmt.Printf("Available collectors:\n")
 		for _, n := range collectorNames {
@@ -235,30 +263,26 @@ func main() {
 		}
 		return
 	}
-	collectors, err := loadCollectors(lookupConfig("collectors.enabled", *enabledCollectors).(string))
-	// This instance is only used to check collector creation and logging.
-	nc, err := collector.NewNodeCollector()
-	if err != nil {
-		log.Fatalf("Couldn't create collector: %s", err)
-	}
-	log.Infof("Enabled collectors:")
-	collectors := []string{}
-	for n := range nc.Collectors {
-		collectors = append(collectors, n)
-	}
-	sort.Strings(collectors)
-	for _, n := range collectors {
-		log.Infof(" - %s", n)
-	}
 
 	if *disableDefaultCollectors {
 		collector.DisableDefaultCollectors()
 	}
+
+	if *enabledCollectors != "" {
+		collector.DisableDefaultCollectors()
+		for _, name := range strings.Split(*enabledCollectors, ",") {
+			collector.SetCollectorState(name, true)
+		}
+	}
+
+	logger := promlog.New(promlogConfig)
+
 	level.Info(logger).Log("msg", "Starting node_exporter", "version", version.Info())
 	level.Info(logger).Log("msg", "Build context", "build_context", version.BuildContext())
 	if user, err := user.Current(); err == nil && user.Uid == "0" {
 		level.Warn(logger).Log("msg", "Node Exporter is running as root user. This exporter is designed to run as unprivileged user, root is not required.")
 	}
+
 	runtime.GOMAXPROCS(*maxProcs)
 	level.Debug(logger).Log("msg", "Go MAXPROCS", "procs", runtime.GOMAXPROCS(0))
 
@@ -283,7 +307,49 @@ func main() {
 		http.Handle("/", landingPage)
 	}
 
+	if *sslCertFile != "" || *sslKeyFile != "" {
+		if *webConfigFile == "" {
+			level.Error(logger).Log("Use web.config.file flag/config to tell the location of prometheus web file")
+			os.Exit(1)
+		}
+
+		authConfigBytes, err := os.ReadFile(*webAuthFile)
+		if err != nil {
+			level.Error(logger).Log("err", err)
+			os.Exit(1)
+		}
+		var authC authConfig
+		if err := yaml.Unmarshal(authConfigBytes, &authC); err != nil {
+			level.Error(logger).Log("err", err)
+			os.Exit(1)
+		}
+
+		prometheusWebConfig := web.Config{
+			Users: map[string]prometheusConfig.Secret{
+				authC.ServerUser: prometheusConfig.Secret(authC.ServerPassword),
+			},
+		}
+		prometheusWebConfig.TLSConfig.TLSCertPath = *sslCertFile
+		prometheusWebConfig.TLSConfig.TLSKeyPath = *sslKeyFile
+
+		webConfigBytes, err := yaml.Marshal(prometheusWebConfig)
+		if err != nil {
+			level.Error(logger).Log("err", err)
+			os.Exit(1)
+		}
+
+		if err = os.WriteFile(*webConfigFile, webConfigBytes, 0600); err != nil {
+			level.Error(logger).Log("err", err)
+			os.Exit(1)
+		}
+	}
+
 	server := &http.Server{}
+	toolkitFlags := &web.FlagConfig{
+		WebSystemdSocket:   systemdSocket,
+		WebListenAddresses: listenAddress,
+		WebConfigFile:      webConfigFile,
+	}
 	if err := web.ListenAndServe(server, toolkitFlags, logger); err != nil {
 		level.Error(logger).Log("err", err)
 		os.Exit(1)
@@ -291,16 +357,22 @@ func main() {
 }
 
 type config struct {
-	WebConfig        webConfig        `ini:"web"`
-	CollectorsConfig collectorsConfig `ini:"collectors"`
+	Web        webConfig        `ini:"web"`
+	Collectors collectorsConfig `ini:"collectors"`
+	Collector  collectorConfig  `ini:"collector"`
+	Runtime    runtimeConfig    `ini:"runtime"`
 }
 
 type webConfig struct {
-	ListenAddress string  `ini:"listen-address"`
-	MetricsPath   string  `ini:"telemetry-path"`
-	SSLCertFile   string  `ini:"ssl-cert-file"`
-	SSLKeyFile    string  `ini:"ssl-key-file"`
-	AuthFile      *string `ini:"auth-file"`
+	ListenAddress          []string `ini:"listen-address"`
+	TelemetryPath          string   `ini:"telemetry-path" help:"Path under which to expose metrics."`
+	SSLCertFile            string   `ini:"ssl-cert-file"`
+	SSLKeyFile             string   `ini:"ssl-key-file"`
+	AuthFile               string   `ini:"auth-file"`
+	ConfigFile             string   `ini:"config.file"`
+	DisableExporterMetrics bool     `ini:"disable-exporter-metrics" help:"Exclude metrics about the exporter itself (promhttp_*, process_*, go_*)."`
+	MaxRequests            int      `ini:"max-requests" help:"Maximum number of parallel scrape requests. Use 0 to disable."`
+	SystemdSocket          bool     `ini:"systemd-socket"`
 }
 
 type collectorsConfig struct {
@@ -308,102 +380,15 @@ type collectorsConfig struct {
 	Print   bool   `ini:"print"`
 }
 
-// lookupConfig lookup config from flag
-// or config by name, returns nil if none exists.
-// name should be in this format -> '[section].[key]'
-func lookupConfig(name string, defaultValue interface{}) interface{} {
-	flagSet, flagValue := lookupFlag(name)
-	if flagSet {
-		return flagValue
-	}
-
-	section := ""
-	key := name
-	if i := strings.Index(name, "."); i > 0 {
-		section = name[0:i]
-		if len(name) > i+1 {
-			key = name[i+1:]
-		} else {
-			key = ""
-		}
-	}
-
-	t := reflect.TypeOf(*cfg)
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		iniName := field.Tag.Get("ini")
-		matched := iniName == section
-		if section == "" {
-			matched = iniName == key
-		}
-		if !matched {
-			continue
-		}
-
-		v := reflect.ValueOf(cfg).Elem().Field(i)
-		if section == "" {
-			return v.Interface()
-		}
-
-		if !v.CanAddr() {
-			continue
-		}
-
-		st := reflect.TypeOf(v.Interface())
-		for j := 0; j < st.NumField(); j++ {
-			sectionField := st.Field(j)
-			sectionININame := sectionField.Tag.Get("ini")
-			if sectionININame != key {
-				continue
-			}
-
-			if reflect.ValueOf(v.Addr().Elem().Field(j).Interface()).Kind() != reflect.Ptr {
-				return v.Addr().Elem().Field(j).Interface()
-			}
-
-			if v.Addr().Elem().Field(j).IsNil() {
-				return defaultValue
-			}
-
-			return v.Addr().Elem().Field(j).Elem().Interface()
-		}
-	}
-
-	return defaultValue
+type collectorConfig struct {
+	DisableDefaults bool `ini:"disable-defaults"`
 }
 
-func lookupFlag(name string) (flagSet bool, flagValue interface{}) {
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == name {
-			flagSet = true
-			switch reflect.Indirect(reflect.ValueOf(f.Value)).Kind() {
-			case reflect.Bool:
-				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Bool()
-			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Int()
-			case reflect.Float32, reflect.Float64:
-				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Float()
-			case reflect.String:
-				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).String()
-			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Uint()
-			}
-		}
-	})
-
-	return
+type runtimeConfig struct {
+	GoMaxProcs int `ini:"gomaxprocs"`
 }
 
-func configure() error {
-	iniCfg, err := ini.Load(*configPath)
-	if err != nil {
-		return err
-	}
-
-	if err = iniCfg.MapTo(cfg); err != nil {
-		return err
-	}
-
+func configVisit(visitFn func(string, string, reflect.Value)) {
 	type item struct {
 		value   reflect.Value
 		section string
@@ -432,31 +417,68 @@ func configure() error {
 				continue
 			}
 
-			flagSet, flagValue := lookupFlag(fmt.Sprintf("%s.%s", section, key))
-			if !flagSet {
-				continue
-			}
-
-			if fieldValue.IsValid() && fieldValue.CanSet() {
-				switch fieldValue.Kind() {
-				case reflect.Bool:
-					iniCfg.Section(section).Key(key).SetValue(fmt.Sprintf("%t", flagValue.(bool)))
-				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-					iniCfg.Section(section).Key(key).SetValue(fmt.Sprintf("%d", flagValue.(int64)))
-				case reflect.Float32, reflect.Float64:
-					iniCfg.Section(section).Key(key).SetValue(fmt.Sprintf("%f", flagValue.(float64)))
-				case reflect.String:
-					iniCfg.Section(section).Key(key).SetValue(strconv.Quote(flagValue.(string)))
-				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-					iniCfg.Section(section).Key(key).SetValue(fmt.Sprintf("%d", flagValue.(uint64)))
-				}
-			}
+			visitFn(section, key, fieldValue)
 		}
 	}
+}
+
+func configure() error {
+	iniCfg, err := ini.Load(*configPath)
+	if err != nil {
+		return err
+	}
+
+	if err = iniCfg.MapTo(cfg); err != nil {
+		return err
+	}
+
+	configVisit(func(section, key string, fieldValue reflect.Value) {
+		flagKey := fmt.Sprintf("%s.%s", section, key)
+		if section == "" {
+			flagKey = key
+		}
+
+		setByUser := setByUserMap[flagKey]
+		kingpinF := kingpin.CommandLine.GetFlag(flagKey)
+		if !setByUser || kingpinF == nil {
+			return
+		}
+
+		iniCfg.Section(section).Key(key).SetValue(kingpinF.Model().Value.String())
+	})
 
 	if err = iniCfg.SaveTo(*configPath); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func overrideFlags() {
+	configVisit(func(section, key string, fieldValue reflect.Value) {
+		flagKey := fmt.Sprintf("%s.%s", section, key)
+		if section == "" {
+			flagKey = key
+		}
+
+		setByUser := setByUserMap[flagKey]
+		kingpinF := kingpin.CommandLine.GetFlag(flagKey)
+		if setByUser || kingpinF == nil {
+			return
+		}
+		if fieldValue.Kind() == reflect.Slice {
+			for i := 0; i < fieldValue.Len(); i++ {
+				fmt.Printf("key: %s, value: %s\n", flagKey, fieldValue.Index(i).String())
+				kingpinF.Model().Value.Set(fieldValue.Index(i).String())
+			}
+		} else {
+			fmt.Printf("key: %s, value: %s\n", flagKey, fieldValue.String())
+			kingpinF.Model().Value.Set(fieldValue.String())
+		}
+	})
+}
+
+type authConfig struct {
+	ServerUser     string `yaml:"server_user,omitempty"`
+	ServerPassword string `yaml:"server_password,omitempty"`
 }

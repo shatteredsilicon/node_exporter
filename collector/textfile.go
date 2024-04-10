@@ -33,7 +33,7 @@ import (
 )
 
 var (
-	textFileDirectory = kingpin.Flag("collector.textfile.directory", "Directory to read text files with metrics from.").Default("").String()
+	textFileDirectory = kingpin.Flag("collector.textfile.directory", "Directory to read text files with metrics from.").Default("/opt/ss/ssm-client/textfile-collector").String()
 	mtimeDesc         = prometheus.NewDesc(
 		"node_textfile_mtime_seconds",
 		"Unixtime mtime of textfiles successfully read.",
