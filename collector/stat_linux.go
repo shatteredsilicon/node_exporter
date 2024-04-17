@@ -11,152 +11,127 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !nostat
 // +build !nostat
 
 package collector
 
 import (
-	"bufio"
-	"os"
-	"strconv"
-	"strings"
+	"fmt"
 
+	"github.com/alecthomas/kingpin/v2"
+	"github.com/go-kit/log"
 	"github.com/prometheus/client_golang/prometheus"
-)
-
-const (
-	userHz = 100
+	"github.com/prometheus/procfs"
 )
 
 type statCollector struct {
-	cpu          *prometheus.Desc
+	fs           procfs.FS
 	intr         *prometheus.Desc
 	ctxt         *prometheus.Desc
 	forks        *prometheus.Desc
 	btime        *prometheus.Desc
 	procsRunning *prometheus.Desc
 	procsBlocked *prometheus.Desc
+	softIRQ      *prometheus.Desc
+	logger       log.Logger
+}
+
+var statSoftirqFlag = kingpin.Flag("collector.stat.softirq", "Export softirq calls per vector").Default("false").Bool()
+
+type StatConfig struct {
+	Enabled bool `ini:"stat"`
+	Softirq bool `ini:"stat.softirq"`
 }
 
 func init() {
-	Factories["stat"] = NewStatCollector
+	registerCollector("stat", defaultEnabled, NewStatCollector)
 }
 
 // NewStatCollector returns a new Collector exposing kernel/system statistics.
-func NewStatCollector() (Collector, error) {
+func NewStatCollector(logger log.Logger) (Collector, error) {
+	fs, err := procfs.NewFS(*procPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open procfs: %w", err)
+	}
 	return &statCollector{
-		cpu: prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, "", "cpu"),
-			"Seconds the cpus spent in each mode.",
-			[]string{"cpu", "mode"}, nil,
-		),
+		fs: fs,
 		intr: prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, "", "intr"),
+			prometheus.BuildFQName(namespace, "", "intr_total"),
 			"Total number of interrupts serviced.",
 			nil, nil,
 		),
 		ctxt: prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, "", "context_switches"),
+			prometheus.BuildFQName(namespace, "", "context_switches_total"),
 			"Total number of context switches.",
 			nil, nil,
 		),
 		forks: prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, "", "forks"),
+			prometheus.BuildFQName(namespace, "", "forks_total"),
 			"Total number of forks.",
 			nil, nil,
 		),
 		btime: prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, "", "boot_time"),
+			prometheus.BuildFQName(namespace, "", "boot_time_seconds"),
 			"Node boot time, in unixtime.",
 			nil, nil,
 		),
 		procsRunning: prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, "", "procs_running"),
+			prometheus.BuildFQName(namespace, "", "procs_running"),
 			"Number of processes in runnable state.",
 			nil, nil,
 		),
 		procsBlocked: prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, "", "procs_blocked"),
+			prometheus.BuildFQName(namespace, "", "procs_blocked"),
 			"Number of processes blocked waiting for I/O to complete.",
 			nil, nil,
 		),
+		softIRQ: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "", "softirqs_total"),
+			"Number of softirq calls.",
+			[]string{"vector"}, nil,
+		),
+		logger: logger,
 	}, nil
 }
 
-// Expose kernel and system statistics.
+// Update implements Collector and exposes kernel and system statistics.
 func (c *statCollector) Update(ch chan<- prometheus.Metric) error {
-	file, err := os.Open(procFilePath("stat"))
+	stats, err := c.fs.Stat()
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		parts := strings.Fields(scanner.Text())
-		if len(parts) == 0 {
-			continue
-		}
-		switch {
-		case strings.HasPrefix(parts[0], "cpu"):
-			// Export only per-cpu stats, it can be aggregated up in prometheus.
-			if parts[0] == "cpu" {
-				break
-			}
-			// Only some of these may be present, depending on kernel version.
-			cpuFields := []string{"user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal", "guest"}
-			// OpenVZ guests lack the "guest" CPU field, which needs to be ignored.
-			expectedFieldNum := len(cpuFields) + 1
-			if expectedFieldNum > len(parts) {
-				expectedFieldNum = len(parts)
-			}
-			for i, v := range parts[1:expectedFieldNum] {
-				value, err := strconv.ParseFloat(v, 64)
-				if err != nil {
-					return err
-				}
-				// Convert from ticks to seconds
-				value /= userHz
-				ch <- prometheus.MustNewConstMetric(c.cpu, prometheus.CounterValue, value, parts[0], cpuFields[i])
-			}
-		case parts[0] == "intr":
-			// Only expose the overall number, use the 'interrupts' collector for more detail.
-			value, err := strconv.ParseFloat(parts[1], 64)
-			if err != nil {
-				return err
-			}
-			ch <- prometheus.MustNewConstMetric(c.intr, prometheus.CounterValue, value)
-		case parts[0] == "ctxt":
-			value, err := strconv.ParseFloat(parts[1], 64)
-			if err != nil {
-				return err
-			}
-			ch <- prometheus.MustNewConstMetric(c.ctxt, prometheus.CounterValue, value)
-		case parts[0] == "processes":
-			value, err := strconv.ParseFloat(parts[1], 64)
-			if err != nil {
-				return err
-			}
-			ch <- prometheus.MustNewConstMetric(c.forks, prometheus.CounterValue, value)
-		case parts[0] == "btime":
-			value, err := strconv.ParseFloat(parts[1], 64)
-			if err != nil {
-				return err
-			}
-			ch <- prometheus.MustNewConstMetric(c.btime, prometheus.GaugeValue, value)
-		case parts[0] == "procs_running":
-			value, err := strconv.ParseFloat(parts[1], 64)
-			if err != nil {
-				return err
-			}
-			ch <- prometheus.MustNewConstMetric(c.procsRunning, prometheus.GaugeValue, value)
-		case parts[0] == "procs_blocked":
-			value, err := strconv.ParseFloat(parts[1], 64)
-			if err != nil {
-				return err
-			}
-			ch <- prometheus.MustNewConstMetric(c.procsBlocked, prometheus.GaugeValue, value)
+	ch <- prometheus.MustNewConstMetric(c.intr, prometheus.CounterValue, float64(stats.IRQTotal))
+	ch <- prometheus.MustNewConstMetric(c.ctxt, prometheus.CounterValue, float64(stats.ContextSwitches))
+	ch <- prometheus.MustNewConstMetric(c.forks, prometheus.CounterValue, float64(stats.ProcessCreated))
+
+	ch <- prometheus.MustNewConstMetric(c.btime, prometheus.GaugeValue, float64(stats.BootTime))
+
+	ch <- prometheus.MustNewConstMetric(c.procsRunning, prometheus.GaugeValue, float64(stats.ProcessesRunning))
+	ch <- prometheus.MustNewConstMetric(c.procsBlocked, prometheus.GaugeValue, float64(stats.ProcessesBlocked))
+
+	if *statSoftirqFlag {
+		si := stats.SoftIRQ
+
+		for _, vec := range []struct {
+			name  string
+			value uint64
+		}{
+			{name: "hi", value: si.Hi},
+			{name: "timer", value: si.Timer},
+			{name: "net_tx", value: si.NetTx},
+			{name: "net_rx", value: si.NetRx},
+			{name: "block", value: si.Block},
+			{name: "block_iopoll", value: si.BlockIoPoll},
+			{name: "tasklet", value: si.Tasklet},
+			{name: "sched", value: si.Sched},
+			{name: "hrtimer", value: si.Hrtimer},
+			{name: "rcu", value: si.Rcu},
+		} {
+			ch <- prometheus.MustNewConstMetric(c.softIRQ, prometheus.CounterValue, float64(vec.value), vec.name)
 		}
 	}
-	return scanner.Err()
+
+	return nil
 }

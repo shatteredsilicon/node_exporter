@@ -11,54 +11,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !nouname
 // +build !nouname
 
 package collector
 
-import (
-	"syscall"
+import "golang.org/x/sys/unix"
 
-	"github.com/prometheus/client_golang/prometheus"
-)
-
-var unameDesc = prometheus.NewDesc(
-	prometheus.BuildFQName(Namespace, "uname", "info"),
-	"Labeled system information as provided by the uname system call.",
-	[]string{
-		"sysname",
-		"release",
-		"version",
-		"machine",
-		"nodename",
-		"domainname",
-	},
-	nil,
-)
-
-type unameCollector struct{}
-
-func init() {
-	Factories["uname"] = newUnameCollector
-}
-
-// NewUnameCollector returns new unameCollector.
-func newUnameCollector() (Collector, error) {
-	return &unameCollector{}, nil
-}
-
-func (c unameCollector) Update(ch chan<- prometheus.Metric) error {
-	var uname syscall.Utsname
-	if err := syscall.Uname(&uname); err != nil {
-		return err
+func getUname() (uname, error) {
+	var utsname unix.Utsname
+	if err := unix.Uname(&utsname); err != nil {
+		return uname{}, err
 	}
 
-	ch <- prometheus.MustNewConstMetric(unameDesc, prometheus.GaugeValue, 1,
-		unameToString(uname.Sysname),
-		unameToString(uname.Release),
-		unameToString(uname.Version),
-		unameToString(uname.Machine),
-		unameToString(uname.Nodename),
-		unameToString(uname.Domainname),
-	)
-	return nil
+	output := uname{
+		SysName:    unix.ByteSliceToString(utsname.Sysname[:]),
+		Release:    unix.ByteSliceToString(utsname.Release[:]),
+		Version:    unix.ByteSliceToString(utsname.Version[:]),
+		Machine:    unix.ByteSliceToString(utsname.Machine[:]),
+		NodeName:   unix.ByteSliceToString(utsname.Nodename[:]),
+		DomainName: unix.ByteSliceToString(utsname.Domainname[:]),
+	}
+
+	return output, nil
 }

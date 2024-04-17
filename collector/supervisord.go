@@ -11,85 +11,111 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !nosupervisord
 // +build !nosupervisord
 
 package collector
 
 import (
-	"flag"
+	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"time"
 
-	"github.com/kolo/xmlrpc"
+	"github.com/alecthomas/kingpin/v2"
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
+	"github.com/mattn/go-xmlrpc"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/common/log"
 )
 
 var (
-	supervisordURL = flag.String("collector.supervisord.url", "http://localhost:9001/RPC2", "XML RPC endpoint")
+	supervisordURL = kingpin.Flag("collector.supervisord.url", "XML RPC endpoint.").Default("http://localhost:9001/RPC2").Envar("SUPERVISORD_URL").String()
+	xrpc           *xmlrpc.Client
 )
 
+type SupervisorConfig struct {
+	Enabled bool   `ini:"supervisord"`
+	URL     string `ini:"supervisord.url"`
+}
+
 type supervisordCollector struct {
-	client         *xmlrpc.Client
 	upDesc         *prometheus.Desc
 	stateDesc      *prometheus.Desc
 	exitStatusDesc *prometheus.Desc
-	uptimeDesc     *prometheus.Desc
+	startTimeDesc  *prometheus.Desc
+	logger         log.Logger
 }
 
 func init() {
-	Factories["supervisord"] = NewSupervisordCollector
+	registerCollector("supervisord", defaultDisabled, NewSupervisordCollector)
 }
 
 // NewSupervisordCollector returns a new Collector exposing supervisord statistics.
-func NewSupervisordCollector() (Collector, error) {
-	client, err := xmlrpc.NewClient(*supervisordURL, nil)
-	if err != nil {
-		return nil, err
-	}
-
+func NewSupervisordCollector(logger log.Logger) (Collector, error) {
 	var (
 		subsystem  = "supervisord"
 		labelNames = []string{"name", "group"}
 	)
+
+	if u, err := url.Parse(*supervisordURL); err == nil && u.Scheme == "unix" {
+		// Fake the URI scheme as http, since net/http.*Transport.roundTrip will complain
+		// about a non-http(s) transport.
+		xrpc = xmlrpc.NewClient("http://unix/RPC2")
+		xrpc.HttpClient.Transport = &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				d := net.Dialer{Timeout: 10 * time.Second}
+				return d.DialContext(ctx, "unix", u.Path)
+			},
+		}
+	} else {
+		xrpc = xmlrpc.NewClient(*supervisordURL)
+	}
+
+	level.Warn(logger).Log("msg", "This collector is deprecated and will be removed in the next major version release.")
+
 	return &supervisordCollector{
-		client: client,
 		upDesc: prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, subsystem, "up"),
+			prometheus.BuildFQName(namespace, subsystem, "up"),
 			"Process Up",
 			labelNames,
 			nil,
 		),
 		stateDesc: prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, subsystem, "state"),
+			prometheus.BuildFQName(namespace, subsystem, "state"),
 			"Process State",
 			labelNames,
 			nil,
 		),
 		exitStatusDesc: prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, subsystem, "exit_status"),
+			prometheus.BuildFQName(namespace, subsystem, "exit_status"),
 			"Process Exit Status",
 			labelNames,
 			nil,
 		),
-		uptimeDesc: prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, subsystem, "uptime"),
-			"Process Uptime",
+		startTimeDesc: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, subsystem, "start_time_seconds"),
+			"Process start time",
 			labelNames,
 			nil,
 		),
+		logger: logger,
 	}, nil
 }
 
 func (c *supervisordCollector) isRunning(state int) bool {
 	// http://supervisord.org/subprocess.html#process-states
 	const (
-		STOPPED  = 0
+		// STOPPED  = 0
 		STARTING = 10
 		RUNNING  = 20
-		BACKOFF  = 30
+		// BACKOFF  = 30
 		STOPPING = 40
-		EXITED   = 100
-		FATAL    = 200
-		UNKNOWN  = 1000
+		// EXITED   = 100
+		// FATAL    = 200
+		// UNKNOWN  = 1000
 	)
 	switch state {
 	case STARTING, RUNNING, STOPPING:
@@ -99,7 +125,7 @@ func (c *supervisordCollector) isRunning(state int) bool {
 }
 
 func (c *supervisordCollector) Update(ch chan<- prometheus.Metric) error {
-	var infos []struct {
+	var info struct {
 		Name          string `xmlrpc:"name"`
 		Group         string `xmlrpc:"group"`
 		Start         int    `xmlrpc:"start"`
@@ -113,23 +139,47 @@ func (c *supervisordCollector) Update(ch chan<- prometheus.Metric) error {
 		StderrLogfile string `xmlrcp:"stderr_logfile"`
 		PID           int    `xmlrpc:"pid"`
 	}
-	if err := c.client.Call("supervisor.getAllProcessInfo", nil, &infos); err != nil {
-		return err
-	}
-	for _, info := range infos {
-		lables := []string{info.Name, info.Group}
 
-		ch <- prometheus.MustNewConstMetric(c.stateDesc, prometheus.GaugeValue, float64(info.State), lables...)
-		ch <- prometheus.MustNewConstMetric(c.exitStatusDesc, prometheus.GaugeValue, float64(info.ExitStatus), lables...)
+	res, err := xrpc.Call("supervisor.getAllProcessInfo")
+	if err != nil {
+		return fmt.Errorf("unable to call supervisord: %w", err)
+	}
+
+	for _, p := range res.(xmlrpc.Array) {
+		for k, v := range p.(xmlrpc.Struct) {
+			switch k {
+			case "name":
+				info.Name = v.(string)
+			case "group":
+				info.Group = v.(string)
+			case "start":
+				info.Start = v.(int)
+			case "stop":
+				info.Stop = v.(int)
+			case "now":
+				info.Now = v.(int)
+			case "state":
+				info.State = v.(int)
+			case "statename":
+				info.StateName = v.(string)
+			case "exitstatus":
+				info.ExitStatus = v.(int)
+			case "pid":
+				info.PID = v.(int)
+			}
+		}
+		labels := []string{info.Name, info.Group}
+
+		ch <- prometheus.MustNewConstMetric(c.stateDesc, prometheus.GaugeValue, float64(info.State), labels...)
+		ch <- prometheus.MustNewConstMetric(c.exitStatusDesc, prometheus.GaugeValue, float64(info.ExitStatus), labels...)
 
 		if c.isRunning(info.State) {
-			ch <- prometheus.MustNewConstMetric(c.upDesc, prometheus.GaugeValue, 1, lables...)
-			ch <- prometheus.MustNewConstMetric(c.uptimeDesc, prometheus.CounterValue, float64(info.Now-info.Start), lables...)
+			ch <- prometheus.MustNewConstMetric(c.upDesc, prometheus.GaugeValue, 1, labels...)
+			ch <- prometheus.MustNewConstMetric(c.startTimeDesc, prometheus.CounterValue, float64(info.Start), labels...)
 		} else {
-			ch <- prometheus.MustNewConstMetric(c.upDesc, prometheus.GaugeValue, 0, lables...)
-			ch <- prometheus.MustNewConstMetric(c.uptimeDesc, prometheus.CounterValue, 0, lables...)
+			ch <- prometheus.MustNewConstMetric(c.upDesc, prometheus.GaugeValue, 0, labels...)
 		}
-		log.Debugf("%s:%s is %s on pid %d", info.Group, info.Name, info.StateName, info.PID)
+		level.Debug(c.logger).Log("msg", "process info", "group", info.Group, "name", info.Name, "state", info.StateName, "pid", info.PID)
 	}
 
 	return nil

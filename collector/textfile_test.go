@@ -11,19 +11,45 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !notextfile
+// +build !notextfile
+
 package collector
 
 import (
-	"flag"
-	"io/ioutil"
-	"sort"
-	"strings"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"testing"
 
-	"github.com/golang/protobuf/proto"
+	"github.com/alecthomas/kingpin/v2"
+	"github.com/go-kit/log"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/prometheus/common/promlog"
+	"github.com/prometheus/common/promlog/flag"
 )
 
-func TestParseTextFiles(t *testing.T) {
+type collectorAdapter struct {
+	Collector
+}
+
+// Describe implements the prometheus.Collector interface.
+func (a collectorAdapter) Describe(ch chan<- *prometheus.Desc) {
+	// We have to send *some* metric in Describe, but we don't know which ones
+	// we're going to get, so just send a dummy metric.
+	ch <- prometheus.NewDesc("dummy_metric", "Dummy metric.", nil, nil)
+}
+
+// Collect implements the prometheus.Collector interface.
+func (a collectorAdapter) Collect(ch chan<- prometheus.Metric) {
+	if err := a.Update(ch); err != nil {
+		panic(fmt.Sprintf("failed to update collector: %v", err))
+	}
+}
+
+func TestTextfileCollector(t *testing.T) {
 	tests := []struct {
 		path string
 		out  string
@@ -40,39 +66,86 @@ func TestParseTextFiles(t *testing.T) {
 			path: "fixtures/textfile/nonexistent_path",
 			out:  "fixtures/textfile/nonexistent_path.out",
 		},
+		{
+			path: "fixtures/textfile/client_side_timestamp",
+			out:  "fixtures/textfile/client_side_timestamp.out",
+		},
+		{
+			path: "fixtures/textfile/different_metric_types",
+			out:  "fixtures/textfile/different_metric_types.out",
+		},
+		{
+			path: "fixtures/textfile/inconsistent_metrics",
+			out:  "fixtures/textfile/inconsistent_metrics.out",
+		},
+		{
+			path: "fixtures/textfile/histogram",
+			out:  "fixtures/textfile/histogram.out",
+		},
+		{
+			path: "fixtures/textfile/histogram_extra_dimension",
+			out:  "fixtures/textfile/histogram_extra_dimension.out",
+		},
+		{
+			path: "fixtures/textfile/summary",
+			out:  "fixtures/textfile/summary.out",
+		},
+		{
+			path: "fixtures/textfile/summary_extra_dimension",
+			out:  "fixtures/textfile/summary_extra_dimension.out",
+		},
+		{
+			path: "fixtures/textfile/*_extra_dimension",
+			out:  "fixtures/textfile/glob_extra_dimension.out",
+		},
+		{
+			path: "fixtures/textfile/metrics_merge_empty_help",
+			out:  "fixtures/textfile/metrics_merge_empty_help.out",
+		},
+		{
+			path: "fixtures/textfile/metrics_merge_no_help",
+			out:  "fixtures/textfile/metrics_merge_no_help.out",
+		},
+		{
+			path: "fixtures/textfile/metrics_merge_same_help",
+			out:  "fixtures/textfile/metrics_merge_same_help.out",
+		},
+		{
+			path: "fixtures/textfile/metrics_merge_different_help",
+			out:  "fixtures/textfile/metrics_merge_different_help.out",
+		},
 	}
 
 	for i, test := range tests {
-		c := textFileCollector{
-			path: test.path,
+		mtime := 1.0
+		c := &textFileCollector{
+			path:   test.path,
+			mtime:  &mtime,
+			logger: log.NewNopLogger(),
 		}
 
 		// Suppress a log message about `nonexistent_path` not existing, this is
 		// expected and clutters the test output.
-		err := flag.Set("log.level", "fatal")
-		if err != nil {
+		promlogConfig := &promlog.Config{}
+		flag.AddFlags(kingpin.CommandLine, promlogConfig)
+		if _, err := kingpin.CommandLine.Parse([]string{"--log.level", "debug"}); err != nil {
 			t.Fatal(err)
 		}
 
-		mfs := c.parseTextFiles()
-		textMFs := make([]string, 0, len(mfs))
-		for _, mf := range mfs {
-			if mf.GetName() == "node_textfile_mtime" {
-				mf.GetMetric()[0].GetGauge().Value = proto.Float64(1)
-				mf.GetMetric()[1].GetGauge().Value = proto.Float64(2)
-			}
-			textMFs = append(textMFs, proto.MarshalTextString(mf))
-		}
-		sort.Strings(textMFs)
-		got := strings.Join(textMFs, "")
+		registry := prometheus.NewRegistry()
+		registry.MustRegister(collectorAdapter{c})
 
-		want, err := ioutil.ReadFile(test.out)
+		rw := httptest.NewRecorder()
+		promhttp.HandlerFor(registry, promhttp.HandlerOpts{ErrorHandling: promhttp.ContinueOnError}).ServeHTTP(rw, &http.Request{})
+		got := string(rw.Body.String())
+
+		want, err := os.ReadFile(test.out)
 		if err != nil {
 			t.Fatalf("%d. error reading fixture file %s: %s", i, test.out, err)
 		}
 
 		if string(want) != got {
-			t.Fatalf("%d. want:\n\n%s\n\ngot:\n\n%s", i, string(want), got)
+			t.Fatalf("%d.%q want:\n\n%s\n\ngot:\n\n%s", i, test.path, string(want), got)
 		}
 	}
 }

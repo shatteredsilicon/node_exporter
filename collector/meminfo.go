@@ -11,49 +11,64 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build (darwin || linux || openbsd || netbsd) && !nomeminfo
+// +build darwin linux openbsd netbsd
 // +build !nomeminfo
-// +build !windows,!netbsd
 
 package collector
 
 import (
 	"fmt"
+	"strings"
 
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/common/log"
 )
 
 const (
 	memInfoSubsystem = "memory"
 )
 
-type meminfoCollector struct{}
+type meminfoCollector struct {
+	logger log.Logger
+}
 
 func init() {
-	Factories["meminfo"] = NewMeminfoCollector
+	registerCollector("meminfo", defaultEnabled, NewMeminfoCollector)
+}
+
+type MeminfoConfig struct {
+	Enabled bool `ini:"meminfo"`
 }
 
 // NewMeminfoCollector returns a new Collector exposing memory stats.
-func NewMeminfoCollector() (Collector, error) {
-	return &meminfoCollector{}, nil
+func NewMeminfoCollector(logger log.Logger) (Collector, error) {
+	return &meminfoCollector{logger}, nil
 }
 
 // Update calls (*meminfoCollector).getMemInfo to get the platform specific
 // memory metrics.
 func (c *meminfoCollector) Update(ch chan<- prometheus.Metric) error {
+	var metricType prometheus.ValueType
 	memInfo, err := c.getMemInfo()
 	if err != nil {
-		return fmt.Errorf("couldn't get meminfo: %s", err)
+		return fmt.Errorf("couldn't get meminfo: %w", err)
 	}
-	log.Debugf("Set node_mem: %#v", memInfo)
+	level.Debug(c.logger).Log("msg", "Set node_mem", "memInfo", memInfo)
 	for k, v := range memInfo {
+		if strings.HasSuffix(k, "_total") {
+			metricType = prometheus.CounterValue
+		} else {
+			metricType = prometheus.GaugeValue
+		}
 		ch <- prometheus.MustNewConstMetric(
 			prometheus.NewDesc(
-				prometheus.BuildFQName(Namespace, memInfoSubsystem, k),
+				prometheus.BuildFQName(namespace, memInfoSubsystem, k),
 				fmt.Sprintf("Memory information field %s.", k),
 				nil, nil,
 			),
-			prometheus.GaugeValue, v,
+			metricType, v,
 		)
 	}
 	return nil

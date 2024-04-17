@@ -11,25 +11,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build (freebsd || dragonfly) && !noexec
 // +build freebsd dragonfly
 // +build !noexec
 
 package collector
 
 import (
+	"github.com/go-kit/log"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 type execCollector struct {
 	sysctls []bsdSysctl
+	logger  log.Logger
 }
 
 func init() {
-	Factories["exec"] = NewExecCollector
+	registerCollector("exec", defaultEnabled, NewExecCollector)
 }
 
 // NewExecCollector returns a new Collector exposing system execution statistics.
-func NewExecCollector() (Collector, error) {
+func NewExecCollector(logger log.Logger) (Collector, error) {
 	// From sys/vm/vm_meter.c:
 	// All are of type CTLTYPE_UINT.
 	//
@@ -43,36 +46,43 @@ func NewExecCollector() (Collector, error) {
 	return &execCollector{
 		sysctls: []bsdSysctl{
 			{
-				name:        "context_switches_total",
-				description: "Context switches since system boot.  Resets at architeture unsigned integer.",
+				name:        "exec_context_switches_total",
+				description: "Context switches since system boot.  Resets at architecture unsigned integer.",
 				mib:         "vm.stats.sys.v_swtch",
+				labels:      nil,
 			},
 			{
-				name:        "traps_total",
-				description: "Traps since system boot.  Resets at architeture unsigned integer.",
+				name:        "exec_traps_total",
+				description: "Traps since system boot.  Resets at architecture unsigned integer.",
 				mib:         "vm.stats.sys.v_trap",
+				labels:      nil,
 			},
 			{
-				name:        "system_calls_total",
-				description: "System calls since system boot.  Resets at architeture unsigned integer.",
+				name:        "exec_system_calls_total",
+				description: "System calls since system boot.  Resets at architecture unsigned integer.",
 				mib:         "vm.stats.sys.v_syscall",
 			},
+			labels: nil,
 			{
-				name:        "device_interrupts_total",
-				description: "Device interrupts since system boot.  Resets at architeture unsigned integer.",
+				name:        "exec_device_interrupts_total",
+				description: "Device interrupts since system boot.  Resets at architecture unsigned integer.",
 				mib:         "vm.stats.sys.v_intr",
+				labels:      nil,
 			},
 			{
-				name:        "software_interrupts_total",
-				description: "Software interrupts since system boot.  Resets at architeture unsigned integer.",
+				name:        "exec_software_interrupts_total",
+				description: "Software interrupts since system boot.  Resets at architecture unsigned integer.",
 				mib:         "vm.stats.sys.v_soft",
+				labels:      nil,
 			},
 			{
-				name:        "forks_total",
-				description: "Number of fork() calls since system boot.  Resets at architeture unsigned integer.",
+				name:        "exec_forks_total",
+				description: "Number of fork() calls since system boot.  Resets at architecture unsigned integer.",
 				mib:         "vm.stats.vm.v_forks",
+				labels:      nil,
 			},
 		},
+		logger: logger,
 	}, nil
 }
 
@@ -86,7 +96,7 @@ func (c *execCollector) Update(ch chan<- prometheus.Metric) error {
 
 		ch <- prometheus.MustNewConstMetric(
 			prometheus.NewDesc(
-				prometheus.BuildFQName(Namespace, "exec", m.name),
+				namespace+"_"+m.name,
 				m.description,
 				nil, nil,
 			), prometheus.CounterValue, v)

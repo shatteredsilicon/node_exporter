@@ -11,7 +11,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// +build !nointerrupts
+//go:build !nointerrupts && !amd64
+// +build !nointerrupts,!amd64
 
 package collector
 
@@ -95,20 +96,20 @@ sysctl_intr(struct intr *intr, int idx)
 import "C"
 
 var (
-	interruptLabelNames = []string{"CPU", "type", "devices"}
+	interruptLabelNames = []string{"cpu", "type", "devices"}
 )
 
 func (c *interruptsCollector) Update(ch chan<- prometheus.Metric) error {
 	interrupts, err := getInterrupts()
 	if err != nil {
-		return fmt.Errorf("couldn't get interrupts: %s", err)
+		return fmt.Errorf("couldn't get interrupts: %w", err)
 	}
 	for dev, interrupt := range interrupts {
 		for cpuNo, value := range interrupt.values {
 			ch <- c.desc.mustNewConstMetric(
 				value,
 				strconv.Itoa(cpuNo),
-				fmt.Sprintf("%d", interrupt.vector),
+				strconv.Itoa(interrupt.vector),
 				dev,
 			)
 		}

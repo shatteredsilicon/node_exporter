@@ -11,64 +11,180 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !nonetdev
 // +build !nonetdev
 
 package collector
 
 import (
-	"bufio"
 	"fmt"
-	"io"
-	"os"
-	"regexp"
-	"strings"
 
-	"github.com/prometheus/common/log"
+	"github.com/alecthomas/kingpin/v2"
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
+	"github.com/jsimonetti/rtnetlink"
+	"github.com/prometheus/procfs"
 )
 
 var (
-	procNetDevFieldSep = regexp.MustCompile("[ :] *")
+	netDevNetlink = kingpin.Flag("collector.netdev.netlink", "Use netlink to gather stats instead of /proc/net/dev.").Default("true").Bool()
 )
 
-func getNetDevStats(ignore *regexp.Regexp) (map[string]map[string]string, error) {
-	file, err := os.Open(procFilePath("net/dev"))
+type NetDevLinuxConfig struct {
+	NetLink bool `ini:"netdev.netlink"`
+}
+
+func getNetDevStats(filter *deviceFilter, logger log.Logger) (netDevStats, error) {
+	if *netDevNetlink {
+		return netlinkStats(filter, logger)
+	}
+	return procNetDevStats(filter, logger)
+}
+
+func netlinkStats(filter *deviceFilter, logger log.Logger) (netDevStats, error) {
+	conn, err := rtnetlink.Dial(nil)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
 
-	return parseNetDevStats(file, ignore)
+	defer conn.Close()
+	links, err := conn.Link.List()
+	if err != nil {
+		return nil, err
+	}
+
+	return parseNetlinkStats(links, filter, logger), nil
 }
 
-func parseNetDevStats(r io.Reader, ignore *regexp.Regexp) (map[string]map[string]string, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Scan() // skip first header
-	scanner.Scan()
-	parts := strings.Split(scanner.Text(), "|")
-	if len(parts) != 3 { // interface + receive + transmit
-		return nil, fmt.Errorf("invalid header line in net/dev: %s",
-			scanner.Text())
-	}
+func parseNetlinkStats(links []rtnetlink.LinkMessage, filter *deviceFilter, logger log.Logger) netDevStats {
+	metrics := netDevStats{}
 
-	header := strings.Fields(parts[1])
-	netDev := map[string]map[string]string{}
-	for scanner.Scan() {
-		line := strings.TrimLeft(scanner.Text(), " ")
-		parts := procNetDevFieldSep.Split(line, -1)
-		if len(parts) != 2*len(header)+1 {
-			return nil, fmt.Errorf("invalid line in net/dev: %s", scanner.Text())
-		}
-
-		dev := parts[0][:len(parts[0])]
-		if ignore.MatchString(dev) {
-			log.Debugf("Ignoring device: %s", dev)
+	for _, msg := range links {
+		if msg.Attributes == nil {
+			level.Debug(logger).Log("msg", "No netlink attributes, skipping")
 			continue
 		}
-		netDev[dev] = map[string]string{}
-		for i, v := range header {
-			netDev[dev]["receive_"+v] = parts[i+1]
-			netDev[dev]["transmit_"+v] = parts[i+1+len(header)]
+		name := msg.Attributes.Name
+		stats := msg.Attributes.Stats64
+		if stats32 := msg.Attributes.Stats; stats == nil && stats32 != nil {
+			stats = &rtnetlink.LinkStats64{
+				RXPackets:          uint64(stats32.RXPackets),
+				TXPackets:          uint64(stats32.TXPackets),
+				RXBytes:            uint64(stats32.RXBytes),
+				TXBytes:            uint64(stats32.TXBytes),
+				RXErrors:           uint64(stats32.RXErrors),
+				TXErrors:           uint64(stats32.TXErrors),
+				RXDropped:          uint64(stats32.RXDropped),
+				TXDropped:          uint64(stats32.TXDropped),
+				Multicast:          uint64(stats32.Multicast),
+				Collisions:         uint64(stats32.Collisions),
+				RXLengthErrors:     uint64(stats32.RXLengthErrors),
+				RXOverErrors:       uint64(stats32.RXOverErrors),
+				RXCRCErrors:        uint64(stats32.RXCRCErrors),
+				RXFrameErrors:      uint64(stats32.RXFrameErrors),
+				RXFIFOErrors:       uint64(stats32.RXFIFOErrors),
+				RXMissedErrors:     uint64(stats32.RXMissedErrors),
+				TXAbortedErrors:    uint64(stats32.TXAbortedErrors),
+				TXCarrierErrors:    uint64(stats32.TXCarrierErrors),
+				TXFIFOErrors:       uint64(stats32.TXFIFOErrors),
+				TXHeartbeatErrors:  uint64(stats32.TXHeartbeatErrors),
+				TXWindowErrors:     uint64(stats32.TXWindowErrors),
+				RXCompressed:       uint64(stats32.RXCompressed),
+				TXCompressed:       uint64(stats32.TXCompressed),
+				RXNoHandler:        uint64(stats32.RXNoHandler),
+				RXOtherhostDropped: 0,
+			}
+		}
+
+		if filter.ignored(name) {
+			level.Debug(logger).Log("msg", "Ignoring device", "device", name)
+			continue
+		}
+
+		// Make sure we don't panic when accessing `stats` attributes below.
+		if stats == nil {
+			level.Debug(logger).Log("msg", "No netlink stats, skipping")
+			continue
+		}
+
+		// https://github.com/torvalds/linux/blob/master/include/uapi/linux/if_link.h#L42-L246
+		metrics[name] = map[string]uint64{
+			"receive_packets":  stats.RXPackets,
+			"transmit_packets": stats.TXPackets,
+			"receive_bytes":    stats.RXBytes,
+			"transmit_bytes":   stats.TXBytes,
+			"receive_errors":   stats.RXErrors,
+			"transmit_errors":  stats.TXErrors,
+			"receive_dropped":  stats.RXDropped,
+			"transmit_dropped": stats.TXDropped,
+			"multicast":        stats.Multicast,
+			"collisions":       stats.Collisions,
+
+			// detailed rx_errors
+			"receive_length_errors": stats.RXLengthErrors,
+			"receive_over_errors":   stats.RXOverErrors,
+			"receive_crc_errors":    stats.RXCRCErrors,
+			"receive_frame_errors":  stats.RXFrameErrors,
+			"receive_fifo_errors":   stats.RXFIFOErrors,
+			"receive_missed_errors": stats.RXMissedErrors,
+
+			// detailed tx_errors
+			"transmit_aborted_errors":   stats.TXAbortedErrors,
+			"transmit_carrier_errors":   stats.TXCarrierErrors,
+			"transmit_fifo_errors":      stats.TXFIFOErrors,
+			"transmit_heartbeat_errors": stats.TXHeartbeatErrors,
+			"transmit_window_errors":    stats.TXWindowErrors,
+
+			// for cslip etc
+			"receive_compressed":  stats.RXCompressed,
+			"transmit_compressed": stats.TXCompressed,
+			"receive_nohandler":   stats.RXNoHandler,
 		}
 	}
-	return netDev, scanner.Err()
+
+	return metrics
+}
+
+func procNetDevStats(filter *deviceFilter, logger log.Logger) (netDevStats, error) {
+	metrics := netDevStats{}
+
+	fs, err := procfs.NewFS(*procPath)
+	if err != nil {
+		return metrics, fmt.Errorf("failed to open procfs: %w", err)
+	}
+
+	netDev, err := fs.NetDev()
+	if err != nil {
+		return metrics, fmt.Errorf("failed to parse /proc/net/dev: %w", err)
+	}
+
+	for _, stats := range netDev {
+		name := stats.Name
+
+		if filter.ignored(name) {
+			level.Debug(logger).Log("msg", "Ignoring device", "device", name)
+			continue
+		}
+
+		metrics[name] = map[string]uint64{
+			"receive_bytes":       stats.RxBytes,
+			"receive_packets":     stats.RxPackets,
+			"receive_errors":      stats.RxErrors,
+			"receive_dropped":     stats.RxDropped,
+			"receive_fifo":        stats.RxFIFO,
+			"receive_frame":       stats.RxFrame,
+			"receive_compressed":  stats.RxCompressed,
+			"receive_multicast":   stats.RxMulticast,
+			"transmit_bytes":      stats.TxBytes,
+			"transmit_packets":    stats.TxPackets,
+			"transmit_errors":     stats.TxErrors,
+			"transmit_dropped":    stats.TxDropped,
+			"transmit_fifo":       stats.TxFIFO,
+			"transmit_colls":      stats.TxCollisions,
+			"transmit_carrier":    stats.TxCarrier,
+			"transmit_compressed": stats.TxCompressed,
+		}
+	}
+
+	return metrics, nil
 }

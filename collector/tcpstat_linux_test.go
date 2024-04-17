@@ -11,21 +11,63 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !notcpstat
+// +build !notcpstat
+
 package collector
 
 import (
-	"os"
+	"bytes"
+	"encoding/binary"
+	"syscall"
 	"testing"
+
+	"github.com/josharian/native"
+	"github.com/mdlayher/netlink"
 )
 
-func TestTCPStat(t *testing.T) {
-	file, err := os.Open("fixtures/proc/net/tcpstat")
-	if err != nil {
-		t.Fatal(err)
+func Test_parseTCPStats(t *testing.T) {
+	encode := func(m InetDiagMsg) []byte {
+		var buf bytes.Buffer
+		err := binary.Write(&buf, native.Endian, m)
+		if err != nil {
+			panic(err)
+		}
+		return buf.Bytes()
 	}
-	defer file.Close()
 
-	tcpStats, err := parseTCPStats(file)
+	msg := []netlink.Message{
+		{
+			Data: encode(InetDiagMsg{
+				Family:  syscall.AF_INET,
+				State:   uint8(tcpEstablished),
+				Timer:   0,
+				Retrans: 0,
+				ID:      InetDiagSockID{},
+				Expires: 0,
+				RQueue:  11,
+				WQueue:  21,
+				UID:     0,
+				Inode:   0,
+			}),
+		},
+		{
+			Data: encode(InetDiagMsg{
+				Family:  syscall.AF_INET,
+				State:   uint8(tcpListen),
+				Timer:   0,
+				Retrans: 0,
+				ID:      InetDiagSockID{},
+				Expires: 0,
+				RQueue:  11,
+				WQueue:  21,
+				UID:     0,
+				Inode:   0,
+			}),
+		},
+	}
+
+	tcpStats, err := parseTCPStats(msg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,4 +79,12 @@ func TestTCPStat(t *testing.T) {
 	if want, got := 1, int(tcpStats[tcpListen]); want != got {
 		t.Errorf("want tcpstat number of listen state %d, got %d", want, got)
 	}
+
+	if want, got := 42, int(tcpStats[tcpTxQueuedBytes]); want != got {
+		t.Errorf("want tcpstat number of bytes in tx queue %d, got %d", want, got)
+	}
+	if want, got := 22, int(tcpStats[tcpRxQueuedBytes]); want != got {
+		t.Errorf("want tcpstat number of bytes in rx queue %d, got %d", want, got)
+	}
+
 }

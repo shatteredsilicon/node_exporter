@@ -14,22 +14,51 @@
 package collector
 
 import (
-	"flag"
-	"path"
+	"path/filepath"
+	"strings"
 
+	"github.com/alecthomas/kingpin/v2"
 	"github.com/prometheus/procfs"
 )
 
 var (
 	// The path of the proc filesystem.
-	procPath = flag.String("collector.procfs", procfs.DefaultMountPoint, "procfs mountpoint.")
-	sysPath  = flag.String("collector.sysfs", "/sys", "sysfs mountpoint.")
+	procPath     = kingpin.Flag("path.procfs", "procfs mountpoint.").Default(procfs.DefaultMountPoint).String()
+	sysPath      = kingpin.Flag("path.sysfs", "sysfs mountpoint.").Default("/sys").String()
+	rootfsPath   = kingpin.Flag("path.rootfs", "rootfs mountpoint.").Default("/").String()
+	udevDataPath = kingpin.Flag("path.udev.data", "udev data path.").Default("/run/udev/data").String()
 )
 
+type PathConfig struct {
+	Procfs   string `ini:"path.procfs"`
+	Sysfs    string `ini:"path.sysfs"`
+	Rootfs   string `ini:"path.rootfs"`
+	UdevData string `ini:"path.udev.data"`
+}
+
 func procFilePath(name string) string {
-	return path.Join(*procPath, name)
+	return filepath.Join(*procPath, name)
 }
 
 func sysFilePath(name string) string {
-	return path.Join(*sysPath, name)
+	return filepath.Join(*sysPath, name)
+}
+
+func rootfsFilePath(name string) string {
+	return filepath.Join(*rootfsPath, name)
+}
+
+func udevDataFilePath(name string) string {
+	return filepath.Join(*udevDataPath, name)
+}
+
+func rootfsStripPrefix(path string) string {
+	if *rootfsPath == "/" {
+		return path
+	}
+	stripped := strings.TrimPrefix(path, *rootfsPath)
+	if stripped == "" {
+		return "/"
+	}
+	return stripped
 }

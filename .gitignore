@@ -32,4 +32,8 @@ dependencies-stamp
 /.idea
 *.iml
 
-vendor/
+# Test files extracted from ttar
+collector/fixtures/sys/
+collector/fixtures/udev/
+
+/vendor

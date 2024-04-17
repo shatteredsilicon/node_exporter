@@ -11,6 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !novmstat
 // +build !novmstat
 
 package collector
@@ -19,9 +20,12 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/alecthomas/kingpin/v2"
+	"github.com/go-kit/log"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -29,15 +33,31 @@ const (
 	vmStatSubsystem = "vmstat"
 )
 
-type vmStatCollector struct{}
+var (
+	vmStatFields = kingpin.Flag("collector.vmstat.fields", "Regexp of fields to return for vmstat collector.").Default("^(oom_kill|pgpg|pswp|pg.*fault).*").String()
+)
+
+type VMStatConfig struct {
+	Enabled bool   `ini:"vmstat"`
+	Fields  string `ini:"vmstat.fields"`
+}
+
+type vmStatCollector struct {
+	fieldPattern *regexp.Regexp
+	logger       log.Logger
+}
 
 func init() {
-	Factories["vmstat"] = NewvmStatCollector
+	registerCollector("vmstat", defaultEnabled, NewvmStatCollector)
 }
 
 // NewvmStatCollector returns a new Collector exposing vmstat stats.
-func NewvmStatCollector() (Collector, error) {
-	return &vmStatCollector{}, nil
+func NewvmStatCollector(logger log.Logger) (Collector, error) {
+	pattern := regexp.MustCompile(*vmStatFields)
+	return &vmStatCollector{
+		fieldPattern: pattern,
+		logger:       logger,
+	}, nil
 }
 
 func (c *vmStatCollector) Update(ch chan<- prometheus.Metric) error {
@@ -54,10 +74,13 @@ func (c *vmStatCollector) Update(ch chan<- prometheus.Metric) error {
 		if err != nil {
 			return err
 		}
+		if !c.fieldPattern.MatchString(parts[0]) {
+			continue
+		}
 
 		ch <- prometheus.MustNewConstMetric(
 			prometheus.NewDesc(
-				prometheus.BuildFQName(Namespace, vmStatSubsystem, parts[0]),
+				prometheus.BuildFQName(namespace, vmStatSubsystem, parts[0]),
 				fmt.Sprintf("/proc/vmstat information field %s.", parts[0]),
 				nil, nil),
 			prometheus.UntypedValue,

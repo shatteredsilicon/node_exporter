@@ -14,6 +14,7 @@
 // Based on gopsutil/cpu/cpu_darwin_cgo.go @ ae251eb which is licensed under
 // BSD. See https://github.com/shirou/gopsutil/blob/master/LICENSE for details.
 
+//go:build !nocpu
 // +build !nocpu
 
 package collector
@@ -25,17 +26,20 @@ import (
 	"strconv"
 	"unsafe"
 
+	"github.com/go-kit/log"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 /*
 #cgo LDFLAGS:
 #include <stdlib.h>
+#include <limits.h>
 #include <sys/sysctl.h>
 #include <sys/mount.h>
 #include <mach/mach_init.h>
 #include <mach/mach_host.h>
 #include <mach/host_info.h>
+#include <TargetConditionals.h>
 #if TARGET_OS_MAC
 #include <libproc.h>
 #endif
@@ -44,26 +48,23 @@ import (
 */
 import "C"
 
-// default value. from time.h
-const ClocksPerSec = float64(128)
+// ClocksPerSec default value. from time.h
+const ClocksPerSec = float64(C.CLK_TCK)
 
 type statCollector struct {
-	cpu *prometheus.Desc
+	cpu    *prometheus.Desc
+	logger log.Logger
 }
 
 func init() {
-	Factories["cpu"] = NewCPUCollector
+	registerCollector("cpu", defaultEnabled, NewCPUCollector)
 }
 
-// Takes a prometheus registry and returns a new Collector exposing
-// CPU stats.
-func NewCPUCollector() (Collector, error) {
+// NewCPUCollector returns a new Collector exposing CPU stats.
+func NewCPUCollector(logger log.Logger) (Collector, error) {
 	return &statCollector{
-		cpu: prometheus.NewDesc(
-			prometheus.BuildFQName(Namespace, "", "cpu"),
-			"Seconds the cpus spent in each mode.",
-			[]string{"cpu", "mode"}, nil,
-		),
+		cpu:    nodeCPUSecondsDesc,
+		logger: logger,
 	}, nil
 }
 
@@ -92,17 +93,17 @@ func (c *statCollector) Update(ch chan<- prometheus.Metric) error {
 
 	// the body of struct processor_cpu_load_info
 	// aka processor_cpu_load_info_data_t
-	var cpu_ticks [C.CPU_STATE_MAX]uint32
+	var cpuTicks [C.CPU_STATE_MAX]uint32
 
 	// copy the cpuload array to a []byte buffer
 	// where we can binary.Read the data
-	size := int(ncpu) * binary.Size(cpu_ticks)
+	size := int(ncpu) * binary.Size(cpuTicks)
 	buf := (*[1 << 30]byte)(unsafe.Pointer(cpuload))[:size:size]
 
 	bbuf := bytes.NewBuffer(buf)
 
 	for i := 0; i < int(ncpu); i++ {
-		err := binary.Read(bbuf, binary.LittleEndian, &cpu_ticks)
+		err := binary.Read(bbuf, binary.LittleEndian, &cpuTicks)
 		if err != nil {
 			return err
 		}
@@ -112,7 +113,7 @@ func (c *statCollector) Update(ch chan<- prometheus.Metric) error {
 			"nice":   C.CPU_STATE_NICE,
 			"idle":   C.CPU_STATE_IDLE,
 		} {
-			ch <- prometheus.MustNewConstMetric(c.cpu, prometheus.CounterValue, float64(cpu_ticks[v])/ClocksPerSec, "cpu"+strconv.Itoa(i), k)
+			ch <- prometheus.MustNewConstMetric(c.cpu, prometheus.CounterValue, float64(cpuTicks[v])/ClocksPerSec, strconv.Itoa(i), k)
 		}
 	}
 	return nil

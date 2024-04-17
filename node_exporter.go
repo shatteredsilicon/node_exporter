@@ -14,135 +14,333 @@
 package main
 
 import (
-	"flag"
+	"crypto/tls"
 	"fmt"
+	stdlog "log"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/user"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
+	"github.com/prometheus/common/promlog"
+	"github.com/prometheus/common/promlog/flag"
+	"golang.org/x/crypto/bcrypt"
+
+	"github.com/alecthomas/kingpin/v2"
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
+	promcollectors "github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/prometheus/common/log"
 	"github.com/prometheus/common/version"
-	"github.com/prometheus/node_exporter/collector"
+	"github.com/prometheus/exporter-toolkit/web"
+	"github.com/shatteredsilicon/node_exporter/collector"
 	"gopkg.in/ini.v1"
-
-	"github.com/shatteredsilicon/exporter_shared"
+	"gopkg.in/yaml.v2"
 )
 
-const (
-	defaultCollectors = "conntrack,cpu,diskstats,entropy,edac,exec,filefd,filesystem,hwmon,infiniband,loadavg,mdadm,meminfo,netdev,netstat,sockstat,stat,textfile,time,uname,vmstat,wifi,zfs"
-)
-
-var (
-	scrapeDurationDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(collector.Namespace, "scrape", "collector_duration_seconds"),
-		"node_exporter: Duration of a collector scrape.",
-		[]string{"collector"},
-		nil,
-	)
-	scrapeSuccessDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(collector.Namespace, "scrape", "collector_success"),
-		"node_exporter: Whether a collector succeeded.",
-		[]string{"collector"},
-		nil,
-	)
-)
-
-// NodeCollector implements the prometheus.Collector interface.
-type NodeCollector struct {
-	collectors map[string]collector.Collector
+// handler wraps an unfiltered http.Handler but uses a filtered handler,
+// created on the fly, if filtering is requested. Create instances with
+// newHandler.
+type handler struct {
+	unfilteredHandler http.Handler
+	// exporterMetricsRegistry is a separate registry for the metrics about
+	// the exporter itself.
+	exporterMetricsRegistry *prometheus.Registry
+	includeExporterMetrics  bool
+	maxRequests             int
+	logger                  log.Logger
 }
 
-// Describe implements the prometheus.Collector interface.
-func (n NodeCollector) Describe(ch chan<- *prometheus.Desc) {
-	ch <- scrapeDurationDesc
-	ch <- scrapeSuccessDesc
-}
-
-// Collect implements the prometheus.Collector interface.
-func (n NodeCollector) Collect(ch chan<- prometheus.Metric) {
-	wg := sync.WaitGroup{}
-	wg.Add(len(n.collectors))
-	for name, c := range n.collectors {
-		go func(name string, c collector.Collector) {
-			execute(name, c, ch)
-			wg.Done()
-		}(name, c)
+func newHandler(includeExporterMetrics bool, maxRequests int, logger log.Logger) *handler {
+	h := &handler{
+		exporterMetricsRegistry: prometheus.NewRegistry(),
+		includeExporterMetrics:  includeExporterMetrics,
+		maxRequests:             maxRequests,
+		logger:                  logger,
 	}
-	wg.Wait()
-}
-
-func filterAvailableCollectors(collectors string) string {
-	var availableCollectors []string
-	for _, c := range strings.Split(collectors, ",") {
-		_, ok := collector.Factories[c]
-		if ok {
-			availableCollectors = append(availableCollectors, c)
-		}
+	if h.includeExporterMetrics {
+		h.exporterMetricsRegistry.MustRegister(
+			promcollectors.NewProcessCollector(promcollectors.ProcessCollectorOpts{}),
+			promcollectors.NewGoCollector(),
+		)
 	}
-	return strings.Join(availableCollectors, ",")
-}
-
-func execute(name string, c collector.Collector, ch chan<- prometheus.Metric) {
-	begin := time.Now()
-	err := c.Update(ch)
-	duration := time.Since(begin)
-	var success float64
-
-	if err != nil {
-		log.Errorf("ERROR: %s collector failed after %fs: %s", name, duration.Seconds(), err)
-		success = 0
+	if innerHandler, err := h.innerHandler(); err != nil {
+		panic(fmt.Sprintf("Couldn't create metrics handler: %s", err))
 	} else {
-		log.Debugf("OK: %s collector succeeded after %fs.", name, duration.Seconds())
-		success = 1
+		h.unfilteredHandler = innerHandler
 	}
-	ch <- prometheus.MustNewConstMetric(scrapeDurationDesc, prometheus.GaugeValue, duration.Seconds(), name)
-	ch <- prometheus.MustNewConstMetric(scrapeSuccessDesc, prometheus.GaugeValue, success, name)
+	return h
 }
 
-func loadCollectors(list string) (map[string]collector.Collector, error) {
-	collectors := map[string]collector.Collector{}
-	for _, name := range strings.Split(list, ",") {
-		fn, ok := collector.Factories[name]
-		if !ok {
-			return nil, fmt.Errorf("collector '%s' not available", name)
-		}
-		c, err := fn()
-		if err != nil {
-			return nil, err
-		}
-		collectors[name] = c
+// ServeHTTP implements http.Handler.
+func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	filters := r.URL.Query()["collect[]"]
+	level.Debug(h.logger).Log("msg", "collect query:", "filters", filters)
+
+	if len(filters) == 0 {
+		// No filters, use the prepared unfiltered handler.
+		h.unfilteredHandler.ServeHTTP(w, r)
+		return
 	}
-	return collectors, nil
+	// To serve filtered metrics, we create a filtering handler on the fly.
+	filteredHandler, err := h.innerHandler(filters...)
+	if err != nil {
+		level.Warn(h.logger).Log("msg", "Couldn't create filtered metrics handler:", "err", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(fmt.Sprintf("Couldn't create filtered metrics handler: %s", err)))
+		return
+	}
+	filteredHandler.ServeHTTP(w, r)
 }
 
-func init() {
-	prometheus.MustRegister(version.NewCollector("node_exporter"))
+// innerHandler is used to create both the one unfiltered http.Handler to be
+// wrapped by the outer handler and also the filtered handlers created on the
+// fly. The former is accomplished by calling innerHandler without any arguments
+// (in which case it will log all the collectors enabled via command-line
+// flags).
+func (h *handler) innerHandler(filters ...string) (http.Handler, error) {
+	nc, err := collector.NewNodeCollector(h.logger, filters...)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't create collector: %s", err)
+	}
+
+	// Only log the creation of an unfiltered handler, which should happen
+	// only once upon startup.
+	if len(filters) == 0 {
+		level.Info(h.logger).Log("msg", "Enabled collectors")
+		collectors := []string{}
+		for n := range nc.Collectors {
+			collectors = append(collectors, n)
+		}
+		sort.Strings(collectors)
+		for _, c := range collectors {
+			level.Info(h.logger).Log("collector", c)
+		}
+	}
+
+	r := prometheus.NewRegistry()
+	r.MustRegister(version.NewCollector("node_exporter"))
+	if err := r.Register(nc); err != nil {
+		return nil, fmt.Errorf("couldn't register node collector: %s", err)
+	}
+
+	var handler http.Handler
+	if h.includeExporterMetrics {
+		handler = promhttp.HandlerFor(
+			prometheus.Gatherers{h.exporterMetricsRegistry, r},
+			promhttp.HandlerOpts{
+				ErrorLog:            stdlog.New(log.NewStdlibAdapter(level.Error(h.logger)), "", 0),
+				ErrorHandling:       promhttp.ContinueOnError,
+				MaxRequestsInFlight: h.maxRequests,
+				Registry:            h.exporterMetricsRegistry,
+			},
+		)
+		// Note that we have to use h.exporterMetricsRegistry here to
+		// use the same promhttp metrics for all expositions.
+		handler = promhttp.InstrumentMetricHandler(
+			h.exporterMetricsRegistry, handler,
+		)
+	} else {
+		handler = promhttp.HandlerFor(
+			r,
+			promhttp.HandlerOpts{
+				ErrorLog:            stdlog.New(log.NewStdlibAdapter(level.Error(h.logger)), "", 0),
+				ErrorHandling:       promhttp.ContinueOnError,
+				MaxRequestsInFlight: h.maxRequests,
+			},
+		)
+	}
+
+	return handler, nil
 }
 
 var cfg = new(config)
+var setByUserMap = make(map[string]bool)
+
+func setByUserFlagAction() func(ctx *kingpin.ParseContext) error {
+	executed := false
+
+	return func(pc *kingpin.ParseContext) error {
+		if executed {
+			return nil
+		}
+
+		for _, elem := range pc.Elements {
+			if elem.Clause == nil {
+				continue
+			}
+
+			flagClause, ok := elem.Clause.(*kingpin.FlagClause)
+			if !ok || flagClause == nil {
+				continue
+			}
+
+			setByUserMap[flagClause.Model().Name] = true
+		}
+
+		executed = true
+		return nil
+	}
+}
+
+// this function is for translating single-hyphen flags into long flags,
+// to make it compatible with earily PMM/SSM version of node_exporter
+func convertFlagAction(short rune) func(ctx *kingpin.ParseContext) error {
+	convertedMap := make(map[rune]bool)
+
+	return func(pc *kingpin.ParseContext) error {
+		if convertedMap[short] {
+			return nil
+		}
+
+		for _, elem := range pc.Elements {
+			if elem.Clause == nil {
+				continue
+			}
+
+			flagClause, ok := elem.Clause.(*kingpin.FlagClause)
+			if !ok || flagClause.Hidden().Model().Short != short {
+				continue
+			}
+
+			ctx, err := kingpin.CommandLine.ParseContext([]string{fmt.Sprintf("--%c%s", short, *elem.Value)})
+			if err != nil && ctx != nil && len(ctx.Elements) > 0 && ctx.Elements[0].Clause != nil {
+				// with standard flag package, single-hyphen bool flag is in format
+				// '-<name>=<bool>', this code block here tries to translate it into
+				// kingpin long bool flag
+
+				clause, ok := ctx.Elements[0].Clause.(*kingpin.FlagClause)
+				if !ok || !clause.Model().IsBoolFlag() {
+					return err
+				}
+
+				boolStrs := strings.Split(*elem.Value, "=")
+				if len(boolStrs) == 1 {
+					return err
+				}
+
+				var boolValue bool
+				boolValue, err = strconv.ParseBool(boolStrs[len(boolStrs)-1])
+				if err != nil {
+					return err
+				}
+
+				if boolValue {
+					ctx, err = kingpin.CommandLine.ParseContext([]string{fmt.Sprintf("--%s", clause.Model().Name)})
+				} else {
+					ctx, err = kingpin.CommandLine.ParseContext([]string{fmt.Sprintf("--no-%s", clause.Model().Name)})
+				}
+			}
+			if err != nil || ctx == nil || len(ctx.Elements) == 0 || ctx.Elements[0].Clause == nil {
+				return err
+			}
+
+			flag, ok := ctx.Elements[0].Clause.(*kingpin.FlagClause)
+			if !ok {
+				return fmt.Errorf("unknow flag")
+			}
+
+			setByUserMap[flag.Model().Name] = true
+			if err = flag.Model().Value.Set(*ctx.Elements[0].Value); err != nil {
+				return err
+			}
+		}
+
+		convertedMap[short] = true
+		return nil
+	}
+}
+
+const webAuthFileFlagName = "web.auth-file"
+
 var (
-	showVersion       = flag.Bool("version", false, "Print version information.")
-	configPath        = flag.String("config", "/opt/ss/ssm-client/node_exporter.conf", "Path of config file")
-	listenAddress     = flag.String("web.listen-address", ":9100", "Address on which to expose metrics and web interface.")
-	metricsPath       = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
-	enabledCollectors = flag.String("collectors.enabled", filterAvailableCollectors(defaultCollectors), "Comma-separated list of collectors to use.")
-	printCollectors   = flag.Bool("collectors.print", false, "If true, print available collectors and exit.")
+	disableDefaultCollectors = kingpin.Flag(
+		"collector.disable-defaults",
+		"Set all collectors to disabled by default.",
+	).Default("false").Bool()
+	maxProcs = kingpin.Flag(
+		"runtime.gomaxprocs", "The target number of CPUs Go will run on (GOMAXPROCS)",
+	).Envar("GOMAXPROCS").Default("1").Int()
+	disableExporterMetrics = kingpin.Flag(
+		"web.disable-exporter-metrics",
+		"Exclude metrics about the exporter itself (promhttp_*, process_*, go_*).",
+	).Bool()
+	maxRequests = kingpin.Flag(
+		"web.max-requests",
+		"Maximum number of parallel scrape requests. Use 0 to disable.",
+	).Default("40").Int()
+	metricsPath = kingpin.Flag(
+		"web.telemetry-path",
+		"Path under which to expose metrics.",
+	).Default("/metrics").String()
+	configPath = kingpin.Flag(
+		"config",
+		"Path of config file",
+	).Default("/opt/ss/ssm-client/node_exporter.conf").String()
+	listenAddress = kingpin.Flag(
+		"web.listen-address",
+		"Address on which to expose metrics and web interface.",
+	).Strings()
+	enabledCollectors = kingpin.Flag(
+		"collectors.enabled",
+		"Comma-separated list of collectors to use.",
+	).String()
+	printCollectors = kingpin.Flag(
+		"collectors.print",
+		"If true, print available collectors and exit.",
+	).Bool()
+	sslCertFile = kingpin.Flag(
+		"web.ssl-cert-file",
+		"Path to SSL certificate file.",
+	).String()
+	sslKeyFile = kingpin.Flag(
+		"web.ssl-key-file",
+		"Path to SSL key file.",
+	).String()
+	webAuthFile = kingpin.Flag(
+		webAuthFileFlagName,
+		"Path to YAML file with server_user, server_password keys for HTTP Basic authentication.",
+	).String()
+	webConfigFile = kingpin.Flag(
+		"web.config.file",
+		"Path to prometheus web config file (YAML).",
+	).String()
+	systemdSocket = kingpin.Flag(
+		"web.systemd-socket",
+		"Use systemd socket activation listeners instead of port listeners (Linux only).",
+	).Bool()
+	promlogConfig = &promlog.Config{
+		Level:  &promlog.AllowedLevel{},
+		Format: &promlog.AllowedFormat{},
+	}
+
+	_ = kingpin.Flag("c", "").Hidden().Short('c').Action(convertFlagAction('c')).Strings()
+	_ = kingpin.Flag("w", "").Hidden().Short('w').Action(convertFlagAction('w')).Strings()
 )
 
-func main() {
-	flag.Parse()
+func init() {
+	kingpin.Flag(flag.LevelFlagName, flag.LevelFlagHelp).
+		Default("info").SetValue(promlogConfig.Level)
+	kingpin.Flag(flag.FormatFlagName, flag.FormatFlagHelp).
+		Default("logfmt").SetValue(promlogConfig.Format)
 
-	if *showVersion {
-		fmt.Fprintln(os.Stdout, version.Print("node_exporter"))
-		os.Exit(0)
+	kingpin.CommandLine.PreAction(setByUserFlagAction())
+}
+
+func main() {
+	kingpin.Version(version.Print("node_exporter"))
+	kingpin.CommandLine.UsageWriter(os.Stdout)
+	kingpin.HelpFlag.Short('h')
+	kingpin.Parse()
+
+	if err := ini.MapTo(&cfg, *configPath); err != nil {
+		stdlog.Fatalf(fmt.Sprintf("Load config file %s failed: %s\n", *configPath, err.Error()))
 	}
 
 	if os.Getenv("ON_CONFIGURE") == "1" {
@@ -153,24 +351,14 @@ func main() {
 		os.Exit(0)
 	}
 
-	err := ini.MapTo(cfg, *configPath)
-	if err != nil {
-		log.Fatal(fmt.Sprintf("Load config file %s failed: %s", *configPath, err.Error()))
-	}
+	// override flag value with config value
+	// if it's not set
+	overrideFlags()
 
-	log.Infoln("Starting node_exporter", version.Info())
-	log.Infoln("Build context", version.BuildContext())
-
-	// set flags for exporter_shared server
-	flag.Set("web.ssl-cert-file", lookupConfig("web.ssl-cert-file", "").(string))
-	flag.Set("web.ssl-key-file", lookupConfig("web.ssl-key-file", "").(string))
-	flag.Set("web.auth-file", lookupConfig("web.auth-file", "/opt/ss/ssm-client/ssm.yml").(string))
-
-	if lookupConfig("collectors.print", *printCollectors).(bool) {
-		collectorNames := make(sort.StringSlice, 0, len(collector.Factories))
-		for n := range collector.Factories {
-			collectorNames = append(collectorNames, n)
-		}
+	if *printCollectors {
+		names := collector.Collectors()
+		collectorNames := make(sort.StringSlice, 0, len(names))
+		copy(collectorNames, names)
 		collectorNames.Sort()
 		fmt.Printf("Available collectors:\n")
 		for _, n := range collectorNames {
@@ -178,61 +366,131 @@ func main() {
 		}
 		return
 	}
-	collectors, err := loadCollectors(lookupConfig("collectors.enabled", *enabledCollectors).(string))
+
+	if *disableDefaultCollectors {
+		collector.DisableDefaultCollectors()
+	}
+
+	if *enabledCollectors != "" {
+		collector.DisableDefaultCollectors()
+		for _, name := range strings.Split(*enabledCollectors, ",") {
+			collector.SetCollectorState(name, true)
+		}
+	}
+
+	logger := promlog.New(promlogConfig)
+
+	level.Info(logger).Log("msg", "Starting node_exporter", "version", version.Info())
+	level.Info(logger).Log("msg", "Build context", "build_context", version.BuildContext())
+	if user, err := user.Current(); err == nil && user.Uid == "0" {
+		level.Warn(logger).Log("msg", "Node Exporter is running as root user. This exporter is designed to run as unprivileged user, root is not required.")
+	}
+
+	runtime.GOMAXPROCS(*maxProcs)
+	level.Debug(logger).Log("msg", "Go MAXPROCS", "procs", runtime.GOMAXPROCS(0))
+
+	http.Handle(*metricsPath, newHandler(!*disableExporterMetrics, *maxRequests, logger))
+	if *metricsPath != "/" {
+		landingConfig := web.LandingConfig{
+			Name:        "Node Exporter",
+			Description: "Prometheus Node Exporter",
+			Version:     version.Info(),
+			Links: []web.LandingLinks{
+				{
+					Address: *metricsPath,
+					Text:    "Metrics",
+				},
+			},
+		}
+		landingPage, err := web.NewLandingPage(landingConfig)
+		if err != nil {
+			level.Error(logger).Log("err", err)
+			os.Exit(1)
+		}
+		http.Handle("/", landingPage)
+	}
+
+	var authC authConfig
+	if *webAuthFile != "" {
+		authConfigBytes, err := os.ReadFile(*webAuthFile)
+		if err != nil {
+			level.Error(logger).Log("err", err)
+			os.Exit(1)
+		}
+		if err := yaml.Unmarshal(authConfigBytes, &authC); err != nil {
+			level.Error(logger).Log("err", err)
+			os.Exit(1)
+		}
+	}
+
+	tlsMinVer := (web.TLSVersion)(tls.VersionTLS10)
+	tlsMaxVer := (web.TLSVersion)(tls.VersionTLS13)
+
+	prometheusWebConfig := prometheusWebConfig{
+		TLSConfig: tlsConfig{
+			MinVersion: &tlsMinVer,
+			MaxVersion: &tlsMaxVer,
+		},
+	}
+	if authC.ServerUser != "" {
+		hashedPsw, err := bcrypt.GenerateFromPassword([]byte(authC.ServerPassword), 0)
+		if err != nil {
+			level.Error(logger).Log("err", err)
+			os.Exit(1)
+		}
+		prometheusWebConfig.Users = map[string]string{
+			authC.ServerUser: string(hashedPsw),
+		}
+	}
+	if *sslCertFile != "" || *sslKeyFile != "" {
+		prometheusWebConfig.TLSConfig.TLSCertPath = *sslCertFile
+		prometheusWebConfig.TLSConfig.TLSKeyPath = *sslKeyFile
+	}
+
+	if *webConfigFile == "" {
+		level.Error(logger).Log("Use web.config.file flag/config to tell the location of prometheus web file")
+		os.Exit(1)
+	}
+	webConfigBytes, err := yaml.Marshal(prometheusWebConfig)
 	if err != nil {
-		log.Fatalf("Couldn't load collectors: %s", err)
+		level.Error(logger).Log("err", err)
+		os.Exit(1)
+	}
+	if err = os.WriteFile(*webConfigFile, webConfigBytes, 0600); err != nil {
+		level.Error(logger).Log("err", err)
+		os.Exit(1)
 	}
 
-	log.Infof("Enabled collectors:")
-	for n := range collectors {
-		log.Infof(" - %s", n)
+	server := &http.Server{}
+	toolkitFlags := &web.FlagConfig{
+		WebSystemdSocket:   systemdSocket,
+		WebListenAddresses: listenAddress,
+		WebConfigFile:      webConfigFile,
 	}
-
-	if err := prometheus.Register(NodeCollector{collectors: collectors}); err != nil {
-		log.Fatalf("Couldn't register collector: %s", err)
-	}
-
-	// Use our shared code to run server and exit on error. Upstream's code below will not be executed.
-	listenA := lookupConfig("web.listen-address", *listenAddress).(string)
-	metricsP := lookupConfig("web.telemetry-path", *metricsPath).(string)
-	exporter_shared.RunServer("Node", listenA, metricsP, promhttp.ContinueOnError)
-
-	handler := promhttp.HandlerFor(prometheus.DefaultGatherer,
-		promhttp.HandlerOpts{
-			ErrorLog:      log.NewErrorLogger(),
-			ErrorHandling: promhttp.ContinueOnError,
-		})
-
-	// TODO(ts): Remove deprecated and problematic InstrumentHandler usage.
-	http.Handle(metricsP, prometheus.InstrumentHandler("prometheus", handler))
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`<html>
-			<head><title>Node Exporter</title></head>
-			<body>
-			<h1>Node Exporter</h1>
-			<p><a href="` + metricsP + `">Metrics</a></p>
-			</body>
-			</html>`))
-	})
-
-	log.Infoln("Listening on", listenA)
-	err = http.ListenAndServe(listenA, nil)
-	if err != nil {
-		log.Fatal(err)
+	if err := web.ListenAndServe(server, toolkitFlags, logger); err != nil {
+		level.Error(logger).Log("err", err)
+		os.Exit(1)
 	}
 }
 
 type config struct {
-	WebConfig        webConfig        `ini:"web"`
-	CollectorsConfig collectorsConfig `ini:"collectors"`
+	Web        webConfig        `ini:"web"`
+	Collectors collectorsConfig `ini:"collectors"`
+	Collector  collectorConfig  `ini:"collector"`
+	Runtime    runtimeConfig    `ini:"runtime"`
+	Log        logConfig        `ini:"log"`
 }
 
 type webConfig struct {
-	ListenAddress string  `ini:"listen-address"`
-	MetricsPath   string  `ini:"telemetry-path"`
-	SSLCertFile   string  `ini:"ssl-cert-file"`
-	SSLKeyFile    string  `ini:"ssl-key-file"`
-	AuthFile      *string `ini:"auth-file"`
+	ListenAddress          []string `ini:"listen-address"`
+	TelemetryPath          string   `ini:"telemetry-path" help:"Path under which to expose metrics."`
+	SSLCertFile            string   `ini:"ssl-cert-file"`
+	SSLKeyFile             string   `ini:"ssl-key-file"`
+	AuthFile               string   `ini:"auth-file"`
+	ConfigFile             string   `ini:"config.file"`
+	DisableExporterMetrics bool     `ini:"disable-exporter-metrics" help:"Exclude metrics about the exporter itself (promhttp_*, process_*, go_*)."`
+	MaxRequests            int      `ini:"max-requests" help:"Maximum number of parallel scrape requests. Use 0 to disable."`
+	SystemdSocket          bool     `ini:"systemd-socket"`
 }
 
 type collectorsConfig struct {
@@ -240,102 +498,92 @@ type collectorsConfig struct {
 	Print   bool   `ini:"print"`
 }
 
-// lookupConfig lookup config from flag
-// or config by name, returns nil if none exists.
-// name should be in this format -> '[section].[key]'
-func lookupConfig(name string, defaultValue interface{}) interface{} {
-	flagSet, flagValue := lookupFlag(name)
-	if flagSet {
-		return flagValue
-	}
-
-	section := ""
-	key := name
-	if i := strings.Index(name, "."); i > 0 {
-		section = name[0:i]
-		if len(name) > i+1 {
-			key = name[i+1:]
-		} else {
-			key = ""
-		}
-	}
-
-	t := reflect.TypeOf(*cfg)
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		iniName := field.Tag.Get("ini")
-		matched := iniName == section
-		if section == "" {
-			matched = iniName == key
-		}
-		if !matched {
-			continue
-		}
-
-		v := reflect.ValueOf(cfg).Elem().Field(i)
-		if section == "" {
-			return v.Interface()
-		}
-
-		if !v.CanAddr() {
-			continue
-		}
-
-		st := reflect.TypeOf(v.Interface())
-		for j := 0; j < st.NumField(); j++ {
-			sectionField := st.Field(j)
-			sectionININame := sectionField.Tag.Get("ini")
-			if sectionININame != key {
-				continue
-			}
-
-			if reflect.ValueOf(v.Addr().Elem().Field(j).Interface()).Kind() != reflect.Ptr {
-				return v.Addr().Elem().Field(j).Interface()
-			}
-
-			if v.Addr().Elem().Field(j).IsNil() {
-				return defaultValue
-			}
-
-			return v.Addr().Elem().Field(j).Elem().Interface()
-		}
-	}
-
-	return defaultValue
+type collectorConfig struct {
+	DisableDefaults                    bool `ini:"disable-defaults"`
+	collector.ARPConfig                `ini:"collector"`
+	collector.BCacheConfig             `ini:"collector"`
+	collector.BondingConfig            `ini:"collector"`
+	collector.BtrfsConfig              `ini:"collector"`
+	collector.BuddyInfoConfig          `ini:"collector"`
+	collector.CGroupsConfig            `ini:"collector"`
+	collector.ConntrackConfig          `ini:"collector"`
+	collector.CPUConfig                `ini:"collector"`
+	collector.CPUVulnerabilitiesConfig `ini:"collector"`
+	collector.CPUFreqConfig            `ini:"collector"`
+	collector.DiskStatsConfig          `ini:"collector"`
+	collector.DMIConfig                `ini:"collector"`
+	collector.DrbdConfig               `ini:"collector"`
+	collector.DRMConfig                `ini:"collector"`
+	collector.EDACConfig               `ini:"collector"`
+	collector.EntropyConfig            `ini:"collector"`
+	collector.EthtoolConfig            `ini:"collector"`
+	collector.FibreChannelConfig       `ini:"collector"`
+	collector.FilefdConfig             `ini:"collector"`
+	collector.FilesystemConfig         `ini:"collector"`
+	collector.HWmonConfig              `ini:"collector"`
+	collector.InfinibandConfig         `ini:"collector"`
+	collector.InterruptsConfig         `ini:"collector"`
+	collector.IPVSConfig               `ini:"collector"`
+	collector.KSMDConfig               `ini:"collector"`
+	collector.LnStatConfig             `ini:"collector"`
+	collector.LoadavgConfig            `ini:"collector"`
+	collector.LogindConfig             `ini:"collector"`
+	collector.MdadmConfig              `ini:"collector"`
+	collector.MeminfoConfig            `ini:"collector"`
+	collector.MeminfoNumaConfig        `ini:"collector"`
+	collector.MountStatsConfig         `ini:"collector"`
+	collector.NetClassConfig           `ini:"collector"`
+	collector.NetDevConfig             `ini:"collector"`
+	collector.NetStatConfig            `ini:"collector"`
+	collector.NetworkRouteConfig       `ini:"collector"`
+	collector.NFSConfig                `ini:"collector"`
+	collector.NFSDConfig               `ini:"collector"`
+	collector.NTPConfig                `ini:"collector"`
+	collector.NVMEConfig               `ini:"collector"`
+	collector.OSConfig                 `ini:"collector"`
+	collector.PathConfig               `ini:"collector"`
+	collector.PerfConfig               `ini:"collector"`
+	collector.PowerSupplyConfig        `ini:"collector"`
+	collector.PressureConfig           `ini:"collector"`
+	collector.ProcessesConfig          `ini:"collector"`
+	collector.QdiscConfig              `ini:"collector"`
+	collector.RaplConfig               `ini:"collector"`
+	collector.RunitConfig              `ini:"collector"`
+	collector.SchedStatConfig          `ini:"collector"`
+	collector.SELinuxConfig            `ini:"collector"`
+	collector.SlabInfoConfig           `ini:"collector"`
+	collector.SockStatConfig           `ini:"collector"`
+	collector.SoftirqsConfig           `ini:"collector"`
+	collector.SoftNetConfig            `ini:"collector"`
+	collector.StatConfig               `ini:"collector"`
+	collector.SupervisorConfig         `ini:"collector"`
+	collector.SysctlConfig             `ini:"collector"`
+	collector.SystemdConfig            `ini:"collector"`
+	collector.TapeStatsConfig          `ini:"collector"`
+	collector.TCPStatConfig            `ini:"collector"`
+	collector.TextFileConfig           `ini:"collector"`
+	collector.ThermalZoneConfig        `ini:"collector"`
+	collector.TimeConfig               `ini:"collector"`
+	collector.TimexConfig              `ini:"collector"`
+	collector.UDPQueuesConfig          `ini:"collector"`
+	collector.UnameConfig              `ini:"collector"`
+	collector.VMStatConfig             `ini:"collector"`
+	collector.WIFIConfig               `ini:"collector"`
+	collector.XFSConfig                `ini:"collector"`
+	collector.ZFSConfig                `ini:"collector"`
+	collector.ZoneInfoConfig           `ini:"collector"`
 }
 
-func lookupFlag(name string) (flagSet bool, flagValue interface{}) {
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == name {
-			flagSet = true
-			switch reflect.Indirect(reflect.ValueOf(f.Value)).Kind() {
-			case reflect.Bool:
-				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Bool()
-			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Int()
-			case reflect.Float32, reflect.Float64:
-				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Float()
-			case reflect.String:
-				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).String()
-			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-				flagValue = reflect.Indirect(reflect.ValueOf(f.Value)).Uint()
-			}
-		}
-	})
-
-	return
+type runtimeConfig struct {
+	GoMaxProcs int `ini:"gomaxprocs"`
 }
 
-func configure() error {
-	iniCfg, err := ini.Load(*configPath)
-	if err != nil {
-		return err
-	}
+type logConfig struct {
+	Level  promlog.AllowedLevel  `ini:"level"`
+	Format promlog.AllowedFormat `ini:"format"`
+}
 
-	if err = iniCfg.MapTo(cfg); err != nil {
-		return err
-	}
-
+func configVisit(visitFn func(string, string, reflect.Value)) {
 	type item struct {
 		value   reflect.Value
 		section string
@@ -352,43 +600,116 @@ func configure() error {
 			fieldValue := items[i].value.Field(j)
 			fieldType := items[i].value.Type().Field(j)
 			section := items[i].section
-			key := fieldType.Tag.Get("ini")
+			key := strings.SplitN(fieldType.Tag.Get("ini"), ",", 2)[0]
 
 			if fieldValue.Kind() == reflect.Struct {
-				if fieldValue.CanAddr() && section == "" {
+				if fieldValue.CanAddr() {
+					if section == "" {
+						section = key
+					} else if section != key {
+						section = fmt.Sprintf("%s.%s", section, key)
+					}
+
 					items = append(items, item{
 						value:   fieldValue.Addr().Elem(),
-						section: key,
+						section: section,
 					})
 				}
 				continue
 			}
 
-			flagSet, flagValue := lookupFlag(fmt.Sprintf("%s.%s", section, key))
-			if !flagSet {
-				continue
-			}
-
-			if fieldValue.IsValid() && fieldValue.CanSet() {
-				switch fieldValue.Kind() {
-				case reflect.Bool:
-					iniCfg.Section(section).Key(key).SetValue(fmt.Sprintf("%t", flagValue.(bool)))
-				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-					iniCfg.Section(section).Key(key).SetValue(fmt.Sprintf("%d", flagValue.(int64)))
-				case reflect.Float32, reflect.Float64:
-					iniCfg.Section(section).Key(key).SetValue(fmt.Sprintf("%f", flagValue.(float64)))
-				case reflect.String:
-					iniCfg.Section(section).Key(key).SetValue(strconv.Quote(flagValue.(string)))
-				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-					iniCfg.Section(section).Key(key).SetValue(fmt.Sprintf("%d", flagValue.(uint64)))
-				}
-			}
+			visitFn(section, key, fieldValue)
 		}
 	}
+}
+
+func configure() error {
+	iniCfg, err := ini.Load(*configPath)
+	if err != nil {
+		return err
+	}
+
+	if err = iniCfg.MapTo(cfg); err != nil {
+		return err
+	}
+
+	configVisit(func(section, key string, fieldValue reflect.Value) {
+		flagKey := fmt.Sprintf("%s.%s", section, key)
+		if section == "" {
+			flagKey = key
+		}
+
+		setByUser := setByUserMap[flagKey]
+		kingpinF := kingpin.CommandLine.GetFlag(flagKey)
+		if !setByUser || kingpinF == nil {
+			return
+		}
+
+		// Don't override web.auth-file config
+		if flagKey == webAuthFileFlagName {
+			return
+		}
+
+		iniCfg.Section(section).Key(key).SetValue(kingpinF.Model().Value.String())
+	})
 
 	if err = iniCfg.SaveTo(*configPath); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func overrideFlags() {
+	configVisit(func(section, key string, fieldValue reflect.Value) {
+		flagKey := fmt.Sprintf("%s.%s", section, key)
+		if section == "" {
+			flagKey = key
+		}
+
+		setByUser := setByUserMap[flagKey]
+		kingpinF := kingpin.CommandLine.GetFlag(flagKey)
+		if setByUser || kingpinF == nil {
+			return
+		}
+
+		var values []reflect.Value
+		if fieldValue.Kind() == reflect.Slice {
+			for i := 0; i < fieldValue.Len(); i++ {
+				values = append(values, fieldValue.Index(i))
+			}
+		} else {
+			values = []reflect.Value{fieldValue}
+		}
+
+		for i := range values {
+			switch values[i].Kind() {
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Float32, reflect.Int64:
+				kingpinF.Model().Value.Set(strconv.FormatInt(values[i].Int(), 10))
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+				kingpinF.Model().Value.Set(strconv.FormatUint(values[i].Uint(), 10))
+			case reflect.Bool:
+				kingpinF.Model().Value.Set(strconv.FormatBool(values[i].Bool()))
+			default:
+				kingpinF.Model().Value.Set(values[i].String())
+			}
+		}
+	})
+}
+
+type authConfig struct {
+	ServerUser     string `yaml:"server_user,omitempty"`
+	ServerPassword string `yaml:"server_password,omitempty"`
+}
+
+type prometheusWebConfig struct {
+	TLSConfig tlsConfig         `yaml:"tls_server_config"`
+	Users     map[string]string `yaml:"basic_auth_users"`
+}
+
+type tlsConfig struct {
+	TLSCertPath string          `yaml:"cert_file"`
+	TLSKeyPath  string          `yaml:"key_file"`
+	MinVersion  *web.TLSVersion `yaml:"min_version"`
+	MaxVersion  *web.TLSVersion `yaml:"max_version"`
 }
