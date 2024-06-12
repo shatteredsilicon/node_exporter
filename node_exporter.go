@@ -310,7 +310,7 @@ var (
 	webConfigFile = kingpin.Flag(
 		"web.config.file",
 		"Path to prometheus web config file (YAML).",
-	).String()
+	).Default("/opt/ss/ssm-client/node_exporter.yml").String()
 	systemdSocket = kingpin.Flag(
 		"web.systemd-socket",
 		"Use systemd socket activation listeners instead of port listeners (Linux only).",
@@ -487,7 +487,7 @@ type webConfig struct {
 	SSLCertFile            string   `ini:"ssl-cert-file"`
 	SSLKeyFile             string   `ini:"ssl-key-file"`
 	AuthFile               string   `ini:"auth-file"`
-	ConfigFile             string   `ini:"config.file"`
+	ConfigFile             *string  `ini:"config.file"`
 	DisableExporterMetrics bool     `ini:"disable-exporter-metrics" help:"Exclude metrics about the exporter itself (promhttp_*, process_*, go_*)."`
 	MaxRequests            int      `ini:"max-requests" help:"Maximum number of parallel scrape requests. Use 0 to disable."`
 	SystemdSocket          bool     `ini:"systemd-socket"`
@@ -616,6 +616,8 @@ func configVisit(visitFn func(string, string, reflect.Value)) {
 					})
 				}
 				continue
+			} else if fieldValue.Kind() == reflect.Ptr && fieldValue.Type().Elem().Kind() == reflect.String && fieldValue.IsNil() {
+				continue
 			}
 
 			visitFn(section, key, fieldValue)
@@ -634,6 +636,8 @@ func configure() error {
 	}
 
 	configVisit(func(section, key string, fieldValue reflect.Value) {
+		iniCfg.Section(section).Key(key).SetValue(fieldValue.String())
+
 		flagKey := fmt.Sprintf("%s.%s", section, key)
 		if section == "" {
 			flagKey = key
