@@ -636,6 +636,8 @@ func configure() error {
 	}
 
 	configVisit(func(section, key string, fieldValue reflect.Value) {
+		iniCfg.Section(section).Key(key).SetValue(fieldValue.String())
+
 		flagKey := fmt.Sprintf("%s.%s", section, key)
 		if section == "" {
 			flagKey = key
