@@ -40,13 +40,13 @@ var (
 )
 
 type NetDevConfig struct {
-	Enabled           bool   `ini:"netdev"`
-	DeviceInclude     string `ini:"netdev.device-include"`
-	OldDeviceInclude  string `ini:"netdev.device-whitelist"`
-	DeviceExclude     string `ini:"netdev.device-exclude"`
-	OldDeviceExclude  string `ini:"netdev.device-blacklist"`
-	AddressInfo       bool   `ini:"netdev.address-info"`
-	DetailedMetrics   bool   `ini:"netdev.enable-detailed-metrics"`
+	Enabled           bool    `ini:"netdev"`
+	DeviceInclude     *string `ini:"netdev.device-include"`
+	OldDeviceInclude  *string `ini:"netdev.device-whitelist"`
+	DeviceExclude     *string `ini:"netdev.device-exclude"`
+	OldDeviceExclude  *string `ini:"netdev.device-blacklist"`
+	AddressInfo       bool    `ini:"netdev.address-info"`
+	DetailedMetrics   bool    `ini:"netdev.enable-detailed-metrics"`
 	NetDevLinuxConfig `ini:",inline"`
 }
 

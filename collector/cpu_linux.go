@@ -66,11 +66,11 @@ var (
 )
 
 type CPUConfig struct {
-	Enabled      bool   `ini:"cpu"`
-	EnableGuest  bool   `ini:"cpu.guest"`
-	EnableInfo   bool   `ini:"cpu.info"`
-	FlagsInclude string `ini:"cpu.info.flags-include"`
-	BugsInclude  string `ini:"cpu.info.bugs-include"`
+	Enabled      bool    `ini:"cpu"`
+	EnableGuest  bool    `ini:"cpu.guest"`
+	EnableInfo   bool    `ini:"cpu.info"`
+	FlagsInclude *string `ini:"cpu.info.flags-include"`
+	BugsInclude  *string `ini:"cpu.info.bugs-include"`
 }
 
 func init() {

@@ -43,8 +43,8 @@ var (
 )
 
 type TextFileConfig struct {
-	Enabled bool   `ini:"textfile"`
-	Dir     string `ini:"textfile.directory"`
+	Enabled bool    `ini:"textfile"`
+	Dir     *string `ini:"textfile.directory"`
 }
 
 type textFileCollector struct {

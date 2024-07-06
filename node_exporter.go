@@ -483,10 +483,10 @@ type config struct {
 
 type webConfig struct {
 	ListenAddress          []string `ini:"listen-address"`
-	TelemetryPath          string   `ini:"telemetry-path" help:"Path under which to expose metrics."`
-	SSLCertFile            string   `ini:"ssl-cert-file"`
-	SSLKeyFile             string   `ini:"ssl-key-file"`
-	AuthFile               string   `ini:"auth-file"`
+	TelemetryPath          *string  `ini:"telemetry-path" help:"Path under which to expose metrics."`
+	SSLCertFile            *string  `ini:"ssl-cert-file"`
+	SSLKeyFile             *string  `ini:"ssl-key-file"`
+	AuthFile               *string  `ini:"auth-file"`
 	ConfigFile             *string  `ini:"config.file"`
 	DisableExporterMetrics bool     `ini:"disable-exporter-metrics" help:"Exclude metrics about the exporter itself (promhttp_*, process_*, go_*)."`
 	MaxRequests            int      `ini:"max-requests" help:"Maximum number of parallel scrape requests. Use 0 to disable."`
@@ -494,8 +494,8 @@ type webConfig struct {
 }
 
 type collectorsConfig struct {
-	Enabled string `ini:"enabled"`
-	Print   bool   `ini:"print"`
+	Enabled *string `ini:"enabled"`
+	Print   bool    `ini:"print"`
 }
 
 type collectorConfig struct {
@@ -694,6 +694,12 @@ func overrideFlags() {
 				kingpinF.Model().Value.Set(strconv.FormatUint(values[i].Uint(), 10))
 			case reflect.Bool:
 				kingpinF.Model().Value.Set(strconv.FormatBool(values[i].Bool()))
+			case reflect.Ptr:
+				if values[i].IsNil() {
+					kingpinF.Model().Value.Set("")
+				} else {
+					kingpinF.Model().Value.Set(values[i].Elem().String())
+				}
 			default:
 				kingpinF.Model().Value.Set(values[i].String())
 			}

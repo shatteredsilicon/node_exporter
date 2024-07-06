@@ -48,10 +48,10 @@ var (
 )
 
 type EthtoolConfig struct {
-	Enabled         bool   `ini:"ethtool"`
-	DeviceInclude   string `ini:"ethtool.device-include"`
-	DeviceExclude   string `ini:"ethtool.device-exclude"`
-	IncludedMetrics string `ini:"ethtool.metrics-include"`
+	Enabled         bool    `ini:"ethtool"`
+	DeviceInclude   *string `ini:"ethtool.device-include"`
+	DeviceExclude   *string `ini:"ethtool.device-exclude"`
+	IncludedMetrics *string `ini:"ethtool.metrics-include"`
 }
 
 type Ethtool interface {

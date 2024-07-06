@@ -47,9 +47,9 @@ var (
 )
 
 type HWmonConfig struct {
-	Enabled     bool   `ini:"hwmon"`
-	ChipInclude string `ini:"hwmon.chip-include"`
-	ChipExclude string `ini:"hwmon.chip-exclude"`
+	Enabled     bool    `ini:"hwmon"`
+	ChipInclude *string `ini:"hwmon.chip-include"`
+	ChipExclude *string `ini:"hwmon.chip-exclude"`
 }
 
 func init() {

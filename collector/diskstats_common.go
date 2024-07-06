@@ -94,10 +94,10 @@ var (
 )
 
 type DiskStatsConfig struct {
-	Enabled          bool   `ini:"diskstats"`
-	DeviceExclude    string `ini:"diskstats.device-exclude"`
-	DeviceInclude    string `ini:"diskstats.device-include"`
-	OldDeviceExclude string `ini:"diskstats.ignored-devices"`
+	Enabled          bool    `ini:"diskstats"`
+	DeviceExclude    *string `ini:"diskstats.device-exclude"`
+	DeviceInclude    *string `ini:"diskstats.device-include"`
+	OldDeviceExclude *string `ini:"diskstats.ignored-devices"`
 }
 
 func newDiskstatsDeviceFilter(logger log.Logger) (deviceFilter, error) {

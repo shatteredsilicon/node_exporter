@@ -64,11 +64,11 @@ var (
 )
 
 type FilesystemConfig struct {
-	Enabled               bool   `ini:"filesystem"`
-	MountPointExclude     string `ini:"filesystem.mount-points-exclude"`
-	OldMountPointExclude  string `ini:"filesystem.ignored-mount-points"`
-	FSTypesExclude        string `ini:"filesystem.fs-types-exclude"`
-	OldFSTypesExclude     string `ini:"filesystem.ignored-fs-types"`
+	Enabled               bool    `ini:"filesystem"`
+	MountPointExclude     *string `ini:"filesystem.mount-points-exclude"`
+	OldMountPointExclude  *string `ini:"filesystem.ignored-mount-points"`
+	FSTypesExclude        *string `ini:"filesystem.fs-types-exclude"`
+	OldFSTypesExclude     *string `ini:"filesystem.ignored-fs-types"`
 	FilesystemLinuxConfig `ini:",inline"`
 }
 

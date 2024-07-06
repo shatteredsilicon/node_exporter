@@ -37,8 +37,8 @@ var (
 )
 
 type SupervisorConfig struct {
-	Enabled bool   `ini:"supervisord"`
-	URL     string `ini:"supervisord.url"`
+	Enabled bool    `ini:"supervisord"`
+	URL     *string `ini:"supervisord.url"`
 }
 
 type supervisordCollector struct {

@@ -36,10 +36,10 @@ var (
 )
 
 type ARPConfig struct {
-	Enabled       bool   `ini:"arp"`
-	DeviceInclude string `ini:"arp.device-include"`
-	DeviceExclude string `ini:"arp.device-exclude"`
-	NetLink       bool   `ini:"arp.netlink"`
+	Enabled       bool    `ini:"arp"`
+	DeviceInclude *string `ini:"arp.device-include"`
+	DeviceExclude *string `ini:"arp.device-exclude"`
+	NetLink       bool    `ini:"arp.netlink"`
 }
 
 type arpCollector struct {
