@@ -33,8 +33,8 @@ var (
 )
 
 type TapeStatsConfig struct {
-	Enabled        bool   `ini:"tapestats"`
-	IgnoredDevices string `ini:"tapestats.ignored-devices"`
+	Enabled        bool    `ini:"tapestats"`
+	IgnoredDevices *string `ini:"tapestats.ignored-devices"`
 }
 
 type tapestatsCollector struct {

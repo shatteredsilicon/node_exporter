@@ -50,12 +50,12 @@ var (
 )
 
 type QdiscConfig struct {
-	Enabled          bool   `ini:"qdisc"`
-	Fixtures         string `ini:"qdisc.fixtures"`
-	DeviceInclude    string `ini:"qdisc.device-include"`
-	OldDeviceInclude string `ini:"qdisk.device-include"`
-	DeviceExclude    string `ini:"qdisc.device-exclude"`
-	OldDeviceExclude string `ini:"qdisk.device-exclude"`
+	Enabled          bool    `ini:"qdisc"`
+	Fixtures         *string `ini:"qdisc.fixtures"`
+	DeviceInclude    *string `ini:"qdisc.device-include"`
+	OldDeviceInclude *string `ini:"qdisk.device-include"`
+	DeviceExclude    *string `ini:"qdisc.device-exclude"`
+	OldDeviceExclude *string `ini:"qdisk.device-exclude"`
 }
 
 func init() {

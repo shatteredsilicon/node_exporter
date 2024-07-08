@@ -37,10 +37,10 @@ var (
 )
 
 type NetClassConfig struct {
-	Enabled            bool   `ini:"netclass"`
-	IgnoreDevices      string `ini:"netclass.ignored-devices"`
-	IgnoreInvalidSpeed bool   `ini:"netclass.ignore-invalid-speed"`
-	NetLink            bool   `ini:"netclass.netlink"`
+	Enabled            bool    `ini:"netclass"`
+	IgnoreDevices      *string `ini:"netclass.ignored-devices"`
+	IgnoreInvalidSpeed bool    `ini:"netclass.ignore-invalid-speed"`
+	NetLink            bool    `ini:"netclass.netlink"`
 	NetClassRTNLConfig `ini:",inline"`
 }
 

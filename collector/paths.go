@@ -30,10 +30,10 @@ var (
 )
 
 type PathConfig struct {
-	Procfs   string `ini:"path.procfs"`
-	Sysfs    string `ini:"path.sysfs"`
-	Rootfs   string `ini:"path.rootfs"`
-	UdevData string `ini:"path.udev.data"`
+	Procfs   *string `ini:"path.procfs"`
+	Sysfs    *string `ini:"path.sysfs"`
+	Rootfs   *string `ini:"path.rootfs"`
+	UdevData *string `ini:"path.udev.data"`
 }
 
 func procFilePath(name string) string {

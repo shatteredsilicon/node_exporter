@@ -51,7 +51,7 @@ var (
 
 type NTPConfig struct {
 	Enabled         bool          `ini:"ntp"`
-	Server          string        `ini:"ntp.server"`
+	Server          *string       `ini:"ntp.server"`
 	ServerPort      int           `ini:"ntp.server-port"`
 	ProtocolVersion int           `ini:"ntp.protocol-version"`
 	ServerIsLocal   bool          `ini:"ntp.server-is-local"`

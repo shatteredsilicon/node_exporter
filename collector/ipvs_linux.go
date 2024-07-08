@@ -68,8 +68,8 @@ var (
 )
 
 type IPVSConfig struct {
-	Enabled       bool   `ini:"ipvs"`
-	BackendLabels string `ini:"ipvs.backend-labels"`
+	Enabled       bool    `ini:"ipvs"`
+	BackendLabels *string `ini:"ipvs.backend-labels"`
 }
 
 func init() {

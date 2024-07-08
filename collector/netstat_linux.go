@@ -40,8 +40,8 @@ var (
 )
 
 type NetStatConfig struct {
-	Enabled bool   `ini:"netstat"`
-	Fields  string `ini:"netstat.fields"`
+	Enabled bool    `ini:"netstat"`
+	Fields  *string `ini:"netstat.fields"`
 }
 
 type netStatCollector struct {

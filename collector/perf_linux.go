@@ -47,7 +47,7 @@ var (
 
 type PerfConfig struct {
 	Enabled        bool     `ini:"perf"`
-	CPUFlags       string   `ini:"perf.cpus"`
+	CPUFlags       *string  `ini:"perf.cpus"`
 	TracepointFlag []string `ini:"perf.tracepoint"`
 	NoHwProfiler   bool     `ini:"perf.disable-hardware-profilers"`
 	HwProfilers    []string `ini:"perf.hardware-profilers"`

@@ -53,8 +53,8 @@ var (
 )
 
 type WIFIConfig struct {
-	Enabled  bool   `ini:"wifi"`
-	Fixtures string `ini:"wifi.fixtures"`
+	Enabled  bool    `ini:"wifi"`
+	Fixtures *string `ini:"wifi.fixtures"`
 }
 
 func init() {

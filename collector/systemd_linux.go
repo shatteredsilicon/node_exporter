@@ -63,15 +63,15 @@ var (
 )
 
 type SystemdConfig struct {
-	Enabled          bool   `ini:"systemd"`
-	UnitInclude      string `ini:"systemd.unit-include"`
-	OldUnitInclude   string `ini:"systemd.unit-whitelist"`
-	UnitExclude      string `ini:"systemd.unit-exclude"`
-	OldUnitExclude   string `ini:"systemd.unit-blacklist"`
-	Private          bool   `ini:"systemd.private"`
-	TaskMetrics      bool   `ini:"systemd.enable-task-metrics"`
-	RestartsMetrics  bool   `ini:"systemd.enable-restarts-metrics"`
-	StartTimeMetrics bool   `ini:"systemd.enable-start-time-metrics"`
+	Enabled          bool    `ini:"systemd"`
+	UnitInclude      *string `ini:"systemd.unit-include"`
+	OldUnitInclude   *string `ini:"systemd.unit-whitelist"`
+	UnitExclude      *string `ini:"systemd.unit-exclude"`
+	OldUnitExclude   *string `ini:"systemd.unit-blacklist"`
+	Private          bool    `ini:"systemd.private"`
+	TaskMetrics      bool    `ini:"systemd.enable-task-metrics"`
+	RestartsMetrics  bool    `ini:"systemd.enable-restarts-metrics"`
+	StartTimeMetrics bool    `ini:"systemd.enable-start-time-metrics"`
 }
 
 type systemdCollector struct {

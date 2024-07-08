@@ -27,8 +27,8 @@ import (
 var runitServiceDir = kingpin.Flag("collector.runit.servicedir", "Path to runit service directory.").Default("/etc/service").String()
 
 type RunitConfig struct {
-	Enabled    bool   `ini:"runit"`
-	ServiceDir string `ini:"runit.servicedir"`
+	Enabled    bool    `ini:"runit"`
+	ServiceDir *string `ini:"runit.servicedir"`
 }
 
 type runitCollector struct {

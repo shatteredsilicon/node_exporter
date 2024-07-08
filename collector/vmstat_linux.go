@@ -38,8 +38,8 @@ var (
 )
 
 type VMStatConfig struct {
-	Enabled bool   `ini:"vmstat"`
-	Fields  string `ini:"vmstat.fields"`
+	Enabled bool    `ini:"vmstat"`
+	Fields  *string `ini:"vmstat.fields"`
 }
 
 type vmStatCollector struct {
