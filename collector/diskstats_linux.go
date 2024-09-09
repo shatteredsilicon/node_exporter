@@ -282,10 +282,6 @@ func (c *diskstatsCollector) Update(ch chan<- prometheus.Metric) error {
 			continue
 		}
 
-		if stats.IoStatsCount < len(c.descs) {
-			return fmt.Errorf("invalid line for %s for %s", procFilePath("diskstats"), dev)
-		}
-
 		info, err := getUdevDeviceProperties(stats.MajorNumber, stats.MinorNumber)
 		if err != nil {
 			level.Debug(c.logger).Log("msg", "Failed to parse udev info", "err", err)
