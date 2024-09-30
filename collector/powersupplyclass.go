@@ -30,7 +30,7 @@ var (
 )
 
 type PowerSupplyConfig struct {
-	Enabled         bool    `ini:"powersupply"`
+	Enabled         bool    `ini:"powersupplyclass"`
 	IgnoredSupplies *string `ini:"powersupply.ignored-supplies"`
 }
 
