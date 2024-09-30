@@ -30,6 +30,7 @@ import (
 	"github.com/prometheus/common/promlog"
 	"github.com/prometheus/common/promlog/flag"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/exp/slices"
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
@@ -43,6 +44,8 @@ import (
 	"gopkg.in/ini.v1"
 	"gopkg.in/yaml.v2"
 )
+
+var oldDefaultCollectors = []string{"diskstats", "filefd", "filesystem", "loadavg", "meminfo", "netdev", "netstat", "stat", "time", "uname", "vmstat", "meminfo_numa", "textfile"}
 
 // handler wraps an unfiltered http.Handler but uses a filtered handler,
 // created on the fly, if filtering is requested. Create instances with
@@ -160,7 +163,6 @@ func (h *handler) innerHandler(filters ...string) (http.Handler, error) {
 	return handler, nil
 }
 
-var cfg = new(config)
 var setByUserMap = make(map[string]bool)
 
 func setByUserFlagAction() func(ctx *kingpin.ParseContext) error {
@@ -287,14 +289,10 @@ var (
 		"web.listen-address",
 		"Address on which to expose metrics and web interface.",
 	).Strings()
-	enabledCollectors = kingpin.Flag(
+	_ = kingpin.Flag(
 		"collectors.enabled",
 		"Comma-separated list of collectors to use.",
-	).String()
-	printCollectors = kingpin.Flag(
-		"collectors.print",
-		"If true, print available collectors and exit.",
-	).Bool()
+	).Hidden().String()
 	sslCertFile = kingpin.Flag(
 		"web.ssl-cert-file",
 		"Path to SSL certificate file.",
@@ -339,43 +337,40 @@ func main() {
 	kingpin.HelpFlag.Short('h')
 	kingpin.Parse()
 
-	if err := ini.MapTo(&cfg, *configPath); err != nil {
-		stdlog.Fatalf(fmt.Sprintf("Load config file %s failed: %s\n", *configPath, err.Error()))
+	iniCfg, err := ini.Load(*configPath)
+	if err != nil {
+		stdlog.Fatalf(fmt.Sprintf("Failed to load config file %s: %s\n", *configPath, err.Error()))
+	}
+
+	cfg := new(config)
+	if err = iniCfg.MapTo(cfg); err != nil {
+		stdlog.Fatalf(fmt.Sprintf("Failed to map config file %s: %s\n", *configPath, err.Error()))
 	}
 
 	if os.Getenv("ON_CONFIGURE") == "1" {
-		err := configure()
+		err := configure(iniCfg, cfg)
 		if err != nil {
 			os.Exit(1)
 		}
 		os.Exit(0)
 	}
 
+	if iniCfg.HasSection("collectors") {
+		removeCollectorsSection(iniCfg)
+		if err = iniCfg.MapTo(cfg); err != nil {
+			stdlog.Fatalf(fmt.Sprintf("Failed to map config: %s\n", err.Error()))
+		}
+		if err := iniCfg.SaveTo(*configPath); err != nil {
+			stdlog.Fatalf(fmt.Sprintf("Failed to save config file %s: %s\n", *configPath, err.Error()))
+		}
+	}
+
 	// override flag value with config value
 	// if it's not set
-	overrideFlags()
-
-	if *printCollectors {
-		names := collector.Collectors()
-		collectorNames := make(sort.StringSlice, 0, len(names))
-		copy(collectorNames, names)
-		collectorNames.Sort()
-		fmt.Printf("Available collectors:\n")
-		for _, n := range collectorNames {
-			fmt.Printf(" - %s\n", n)
-		}
-		return
-	}
+	overrideFlags(cfg)
 
 	if *disableDefaultCollectors {
 		collector.DisableDefaultCollectors()
-	}
-
-	if *enabledCollectors != "" {
-		collector.DisableDefaultCollectors()
-		for _, name := range strings.Split(*enabledCollectors, ",") {
-			collector.SetCollectorState(name, true)
-		}
 	}
 
 	logger := promlog.New(promlogConfig)
@@ -474,11 +469,10 @@ func main() {
 }
 
 type config struct {
-	Web        webConfig        `ini:"web"`
-	Collectors collectorsConfig `ini:"collectors"`
-	Collector  collectorConfig  `ini:"collector"`
-	Runtime    runtimeConfig    `ini:"runtime"`
-	Log        logConfig        `ini:"log"`
+	Web       webConfig       `ini:"web"`
+	Collector collectorConfig `ini:"collector"`
+	Runtime   runtimeConfig   `ini:"runtime"`
+	Log       logConfig       `ini:"log"`
 }
 
 type webConfig struct {
@@ -491,11 +485,6 @@ type webConfig struct {
 	DisableExporterMetrics bool     `ini:"disable-exporter-metrics" help:"Exclude metrics about the exporter itself (promhttp_*, process_*, go_*)."`
 	MaxRequests            int      `ini:"max-requests" help:"Maximum number of parallel scrape requests. Use 0 to disable."`
 	SystemdSocket          bool     `ini:"systemd-socket"`
-}
-
-type collectorsConfig struct {
-	Enabled *string `ini:"enabled"`
-	Print   bool    `ini:"print"`
 }
 
 type collectorConfig struct {
@@ -583,7 +572,7 @@ type logConfig struct {
 	Format promlog.AllowedFormat `ini:"format"`
 }
 
-func configVisit(visitFn func(string, string, reflect.Value)) {
+func configVisit(cfg *config, visitFn func(string, string, reflect.Value)) {
 	type item struct {
 		value   reflect.Value
 		section string
@@ -625,17 +614,8 @@ func configVisit(visitFn func(string, string, reflect.Value)) {
 	}
 }
 
-func configure() error {
-	iniCfg, err := ini.Load(*configPath)
-	if err != nil {
-		return err
-	}
-
-	if err = iniCfg.MapTo(cfg); err != nil {
-		return err
-	}
-
-	configVisit(func(section, key string, fieldValue reflect.Value) {
+func configure(iniCfg *ini.File, cfg *config) error {
+	configVisit(cfg, func(section, key string, fieldValue reflect.Value) {
 		flagKey := fmt.Sprintf("%s.%s", section, key)
 		if section == "" {
 			flagKey = key
@@ -655,15 +635,20 @@ func configure() error {
 		iniCfg.Section(section).Key(key).SetValue(kingpinF.Model().Value.String())
 	})
 
-	if err = iniCfg.SaveTo(*configPath); err != nil {
+	if setByUserMap["collectors.enabled"] {
+		iniCfg.Section("collectors").Key("enabled").SetValue(kingpin.CommandLine.GetFlag("collectors.enabled").Model().Value.String())
+	}
+
+	removeCollectorsSection(iniCfg)
+	if err := iniCfg.SaveTo(*configPath); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func overrideFlags() {
-	configVisit(func(section, key string, fieldValue reflect.Value) {
+func overrideFlags(cfg *config) {
+	configVisit(cfg, func(section, key string, fieldValue reflect.Value) {
 		flagKey := fmt.Sprintf("%s.%s", section, key)
 		if section == "" {
 			flagKey = key
@@ -703,6 +688,41 @@ func overrideFlags() {
 			}
 		}
 	})
+}
+
+func removeCollectorsSection(iniCfg *ini.File) {
+	if iniCfg == nil || !iniCfg.HasSection("collectors") {
+		return
+	}
+
+	if iniCfg.Section("collectors").HasKey("enabled") {
+		availCollectors := collector.Collectors()
+
+		collectors := strings.Split(iniCfg.Section("collectors").Key("enabled").String(), ",")
+		allFound := true
+		for _, oldDefaultCollector := range oldDefaultCollectors {
+			if !slices.Contains(collectors, oldDefaultCollector) {
+				allFound = false
+				break
+			}
+		}
+
+		if !allFound || len(collectors) != len(oldDefaultCollectors) {
+			for _, availCollector := range availCollectors {
+				iniCfg.Section("collector").Key(availCollector).SetValue("false")
+			}
+
+			for _, collector := range collectors {
+				if !slices.Contains(availCollectors, collector) {
+					continue
+				}
+
+				iniCfg.Section("collector").Key(collector).SetValue("true")
+			}
+		}
+	}
+
+	iniCfg.DeleteSection("collectors")
 }
 
 type authConfig struct {
