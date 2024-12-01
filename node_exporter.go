@@ -695,7 +695,7 @@ func removeCollectorsSection(iniCfg *ini.File) {
 		return
 	}
 
-	if iniCfg.Section("collectors").HasKey("enabled") {
+	if iniCfg.Section("collectors").HasKey("enabled") && strings.TrimSpace(iniCfg.Section("collectors").Key("enabled").String()) != "" {
 		availCollectors := collector.Collectors()
 
 		collectors := strings.Split(iniCfg.Section("collectors").Key("enabled").String(), ",")
