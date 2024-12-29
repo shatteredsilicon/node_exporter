@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"sync"
 
@@ -31,7 +32,6 @@ import (
 	"github.com/prometheus/procfs"
 	"github.com/prometheus/procfs/sysfs"
 	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
 )
 
 type cpuCollector struct {
@@ -213,7 +213,7 @@ func (c *cpuCollector) updateInfo(ch chan<- prometheus.Metric) error {
 
 	cpuFreqEnabled, ok := collectorState["cpufreq"]
 	if !ok || cpuFreqEnabled == nil {
-		level.Debug(c.logger).Log("cpufreq key missing or nil value in collectorState map", err)
+		level.Debug(c.logger).Log("msg", "cpufreq key missing or nil value in collectorState map")
 	} else if !*cpuFreqEnabled {
 		for _, cpu := range info {
 			ch <- prometheus.MustNewConstMetric(c.cpuFrequencyHz,
