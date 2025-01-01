@@ -314,6 +314,18 @@ var (
 		"web.systemd-socket",
 		"Use systemd socket activation listeners instead of port listeners (Linux only).",
 	).Bool()
+	tlsCipherSuites = kingpin.Flag(
+		"web.tls-cipher-suites",
+		"A list of enabled TLS 1.0–1.2 cipher suites. Check full list at https://github.com/golang/go/blob/master/src/crypto/tls/cipher_suites.go",
+	).Strings()
+	tlsMinVersion = kingpin.Flag(
+		"web.tls-min-version",
+		"Minimum TLS version that is acceptable.",
+	).String()
+	tlsMaxVersion = kingpin.Flag(
+		"web.tls-max-version",
+		"Maximum TLS version that is acceptable.",
+	).String()
 	promlogConfig = &promlog.Config{
 		Level:  &promlog.AllowedLevel{},
 		Format: &promlog.AllowedFormat{},
@@ -421,11 +433,43 @@ func main() {
 
 	tlsMinVer := (web.TLSVersion)(tls.VersionTLS10)
 	tlsMaxVer := (web.TLSVersion)(tls.VersionTLS13)
+	if tlsMinVersion != nil && *tlsMinVersion != "" {
+		if err := yaml.Unmarshal([]byte(*tlsMinVersion), &tlsMinVer); err != nil {
+			level.Error(logger).Log("err", fmt.Errorf("Unsupported tls minimum version: %s", *tlsMinVersion))
+			os.Exit(1)
+		}
+	}
+	if tlsMaxVersion != nil && *tlsMaxVersion != "" {
+		if err := yaml.Unmarshal([]byte(*tlsMaxVersion), &tlsMaxVer); err != nil {
+			level.Error(logger).Log("err", fmt.Errorf("Unsupported tls maximum version: %s", *tlsMaxVersion))
+			os.Exit(1)
+		}
+	}
+
+	cipherSuites := []web.Cipher{}
+	if tlsCipherSuites != nil && len(*tlsCipherSuites) != 0 {
+		allCipherSuites := append(tls.CipherSuites(), tls.InsecureCipherSuites()...)
+		for _, tlsCipherSuite := range *tlsCipherSuites {
+			var cipherSuite *tls.CipherSuite
+			for _, v := range allCipherSuites {
+				if v.Name == tlsCipherSuite {
+					cipherSuite = v
+					break
+				}
+			}
+			if cipherSuite == nil {
+				level.Error(logger).Log("err", fmt.Errorf("Unsupported cipher suite: %s", tlsCipherSuite))
+				os.Exit(1)
+			}
+			cipherSuites = append(cipherSuites, web.Cipher(cipherSuite.ID))
+		}
+	}
 
 	prometheusWebConfig := prometheusWebConfig{
 		TLSConfig: tlsConfig{
-			MinVersion: &tlsMinVer,
-			MaxVersion: &tlsMaxVer,
+			MinVersion:   &tlsMinVer,
+			MaxVersion:   &tlsMaxVer,
+			CipherSuites: cipherSuites,
 		},
 	}
 	if authC.ServerUser != "" {
@@ -486,6 +530,9 @@ type webConfig struct {
 	DisableExporterMetrics bool     `ini:"disable-exporter-metrics" help:"Exclude metrics about the exporter itself (promhttp_*, process_*, go_*)."`
 	MaxRequests            int      `ini:"max-requests" help:"Maximum number of parallel scrape requests. Use 0 to disable."`
 	SystemdSocket          bool     `ini:"systemd-socket"`
+	TLSCipherSuites        []string `ini:"tls-cipher-suites,omitempty" help:"A list of enabled TLS 1.0–1.2 cipher suites."`
+	TLSMinVersion          *string  `ini:"tls-min-version,omitempty" help:"Minimum TLS version that is acceptable."`
+	TLSMaxVersion          *string  `ini:"tls-max-version,omitempty" help:"Maximum TLS version that is acceptable."`
 }
 
 type collectorConfig struct {
@@ -737,8 +784,9 @@ type prometheusWebConfig struct {
 }
 
 type tlsConfig struct {
-	TLSCertPath string          `yaml:"cert_file"`
-	TLSKeyPath  string          `yaml:"key_file"`
-	MinVersion  *web.TLSVersion `yaml:"min_version"`
-	MaxVersion  *web.TLSVersion `yaml:"max_version"`
+	TLSCertPath  string          `yaml:"cert_file"`
+	TLSKeyPath   string          `yaml:"key_file"`
+	MinVersion   *web.TLSVersion `yaml:"min_version"`
+	MaxVersion   *web.TLSVersion `yaml:"max_version"`
+	CipherSuites []web.Cipher    `yaml:"cipher_suites,omitempty"`
 }
