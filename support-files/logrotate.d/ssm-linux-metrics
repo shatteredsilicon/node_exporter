@@ -1,4 +1,0 @@
-/var/log/ssm-linux-metrics.log {
-    rotate 30
-    daily
-}
