@@ -1,6 +1,6 @@
 module github.com/shatteredsilicon/node_exporter
 
-go 1.25.9
+go 1.25.10
 
 require (
 	github.com/alecthomas/kingpin/v2 v2.4.0
@@ -28,9 +28,9 @@ require (
 	github.com/prometheus/exporter-toolkit v0.11.0
 	github.com/prometheus/procfs v0.14.0
 	github.com/safchain/ethtool v0.3.0
-	golang.org/x/crypto v0.49.0
+	golang.org/x/crypto v0.50.0
 	golang.org/x/exp v0.0.0-20240416160154-fe59bbe5cc7f
-	golang.org/x/sys v0.42.0
+	golang.org/x/sys v0.43.0
 	gopkg.in/ini.v1 v1.67.0
 	gopkg.in/yaml.v2 v2.4.0
 	howett.net/plist v1.0.1
@@ -54,9 +54,9 @@ require (
 	github.com/xhit/go-str2duration/v2 v2.1.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.6.0 // indirect
-	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/text v0.35.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 )
