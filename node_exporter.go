@@ -193,7 +193,7 @@ func setByUserFlagAction() func(ctx *kingpin.ParseContext) error {
 }
 
 // this function is for translating single-hyphen flags into long flags,
-// to make it compatible with earily PMM/SSM version of node_exporter
+// to make it compatible with earily SSM version of node_exporter
 func convertFlagAction(short rune) func(ctx *kingpin.ParseContext) error {
 	convertedMap := make(map[rune]bool)
 
@@ -358,14 +358,6 @@ func main() {
 	cfg := new(config)
 	if err = iniCfg.MapTo(cfg); err != nil {
 		stdlog.Fatalf(fmt.Sprintf("Failed to map config file %s: %s\n", *configPath, err.Error()))
-	}
-
-	if os.Getenv("ON_CONFIGURE") == "1" {
-		err := configure(iniCfg, cfg)
-		if err != nil {
-			os.Exit(1)
-		}
-		os.Exit(0)
 	}
 
 	if iniCfg.HasSection("collectors") {
@@ -660,39 +652,6 @@ func configVisit(cfg *config, visitFn func(string, string, reflect.Value)) {
 			visitFn(section, key, fieldValue)
 		}
 	}
-}
-
-func configure(iniCfg *ini.File, cfg *config) error {
-	configVisit(cfg, func(section, key string, fieldValue reflect.Value) {
-		flagKey := fmt.Sprintf("%s.%s", section, key)
-		if section == "" {
-			flagKey = key
-		}
-
-		setByUser := setByUserMap[flagKey]
-		kingpinF := kingpin.CommandLine.GetFlag(flagKey)
-		if !setByUser || kingpinF == nil {
-			return
-		}
-
-		// Don't override web.auth-file config
-		if flagKey == webAuthFileFlagName {
-			return
-		}
-
-		iniCfg.Section(section).Key(key).SetValue(kingpinF.Model().Value.String())
-	})
-
-	if setByUserMap["collectors.enabled"] {
-		iniCfg.Section("collectors").Key("enabled").SetValue(kingpin.CommandLine.GetFlag("collectors.enabled").Model().Value.String())
-	}
-
-	removeCollectorsSection(iniCfg)
-	if err := iniCfg.SaveTo(*configPath); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func overrideFlags(cfg *config) {
