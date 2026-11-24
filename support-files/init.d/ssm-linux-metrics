@@ -33,7 +33,8 @@ is_running() {
 }
 
 prepare_log_file() {
-    [ -f "$log_file" ] && chown "$user":"$group" "$log_file"
+    [ ! -f "$log_file" ] && touch "$log_file"
+    chown "$user":"$group" "$log_file"
 }
 
 case "$1" in
